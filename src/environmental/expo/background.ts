@@ -75,12 +75,6 @@ export interface BackgroundTaskOptions {
   lifespan?: number;
 
   /**
-   * Interval between ticks in milliseconds.
-   * @default 100
-   */
-  tickInterval?: number;
-
-  /**
    * Environment options (network state, battery level providers).
    */
   environment?: ExpoWorkflowClientOptions['environment'];
@@ -104,6 +98,10 @@ export interface BackgroundTaskOptions {
 /**
  * Run the workflow engine in a background task.
  *
+ * This uses the event-driven processForDuration() method which processes
+ * pending tasks until the queue is empty or the lifespan is reached.
+ * There is no polling loop - it processes continuously and stops when done.
+ *
  * @param options - Configuration for the background task
  * @returns BackgroundFetchResult indicating success or failure
  *
@@ -125,7 +123,6 @@ export async function runBackgroundWorkflowTask(
   options: BackgroundTaskOptions
 ): Promise<BackgroundFetchResult> {
   const lifespan = options.lifespan ?? 25000;
-  const tickInterval = options.tickInterval ?? 100;
 
   try {
     await options.onStart?.();
@@ -141,15 +138,21 @@ export async function runBackgroundWorkflowTask(
       client.registerWorkflow(workflow);
     }
 
-    // Process for the allowed time
-    await client.start({ lifespan, tickInterval });
+    // Refresh environment state before processing
+    await client.environment.refresh();
+
+    // Process for the allowed time (no polling loop - processes until empty or timeout)
+    const result = await client.processForDuration(lifespan);
 
     // Clean up
     await client.close();
 
-    await options.onComplete?.(0); // TODO: track actual processed count
+    await options.onComplete?.(result.processed);
 
-    return BackgroundFetchResult.NewData;
+    // Return appropriate result based on whether work was done
+    return result.processed > 0
+      ? BackgroundFetchResult.NewData
+      : BackgroundFetchResult.NoData;
   } catch (error) {
     await options.onError?.(error instanceof Error ? error : new Error(String(error)));
     return BackgroundFetchResult.Failed;

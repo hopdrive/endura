@@ -38,6 +38,7 @@ describe('WorkflowEngine - Activity Timeout Handling', () => {
       clock,
       scheduler,
       environment,
+      autoProcess: false, // Disable auto-processing for manual test control
     });
   }
 

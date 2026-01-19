@@ -37,6 +37,7 @@ describe('WorkflowEngine - Dead Letter Queue', () => {
       clock,
       scheduler,
       environment,
+      autoProcess: false, // Disable auto-processing for manual test control
     });
   }
 
@@ -412,6 +413,7 @@ describe('WorkflowEngine - Dead Letter Queue', () => {
         clock,
         scheduler,
         environment,
+        autoProcess: false, // Disable auto-processing for manual test control
         onEvent: (event) => {
           if (event.type === 'deadletter:added') {
             events.push({ type: event.type, runId: event.runId });

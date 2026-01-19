@@ -39,6 +39,7 @@ describe('WorkflowEngine - Callback Error Handling', () => {
       clock,
       scheduler,
       environment,
+      autoProcess: false, // Disable auto-processing for manual test control
     });
   }
 

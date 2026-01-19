@@ -99,6 +99,7 @@ export const photoWorkflow = defineWorkflow({
 
 ```typescript
 // App.tsx
+import { AppState } from 'react-native';
 import { SQLiteStorage, ExpoSqliteDriver } from 'endura/storage/sqlite';
 import { ExpoWorkflowClient } from 'endura/environmental/expo';
 import { openDatabaseAsync } from 'expo-sqlite';
@@ -122,13 +123,23 @@ const client = await ExpoWorkflowClient.create({
 });
 
 client.registerWorkflow(photoWorkflow);
-await client.start();
 
-// Start a workflow
-const execution = await client.engine.start(photoWorkflow, {
+// Start a workflow (auto-triggers processing)
+const execution = await client.startWorkflow(photoWorkflow, {
   input: { moveId: 123, uri: 'file://photo.jpg' },
 });
 console.log('Started workflow:', execution.runId);
+
+// Process pending work on app lifecycle events
+AppState.addEventListener('change', (state) => {
+  if (state === 'active') client.processNow();
+});
+
+// Process when network state changes
+NetInfo.addEventListener((state) => {
+  client.environment.setNetworkState(state.isConnected ?? false);
+  if (state.isConnected) client.processNow();
+});
 ```
 
 That's it! The workflow will:
@@ -613,10 +624,12 @@ const running = await engine.getExecutionsByStatus('running');
 // Control execution
 await engine.cancelExecution(runId);
 
-// Engine control (start processing loop)
-await client.start();                      // Begin processing activities (ExpoWorkflowClient)
-await client.start({ lifespan: 25000 });   // Process for max 25 seconds (background mode)
-engine.stop();                             // Pause processing (works on both client.engine and engine)
+// Event-driven processing (no always-on loops)
+await client.processNow();                 // Process until queue is empty
+await client.processNow({ timeout: 5000 }); // Process with timeout
+await client.processForDuration(25000);    // Process for bounded time (background tasks)
+const hasPending = await client.hasPendingWork(); // Check if work exists
+engine.stop();                             // Stop any in-progress processing
 
 // Dead letter queue
 const deadLetters = await engine.getDeadLetters();
@@ -1355,10 +1368,12 @@ TaskManager.defineTask(BACKGROUND_TASK_NAME, async () => {
     client.registerWorkflow(photoWorkflow);
     client.registerWorkflow(driverStatusSyncWorkflow);
 
-    // Process for limited time (OS limit ~30s, leave buffer)
-    await client.start({ lifespan: 25000 });
+    // Process for bounded time (OS limit ~30s, leave buffer)
+    const result = await client.processForDuration(25000);
 
-    return BackgroundFetch.BackgroundFetchResult.NewData;
+    return result.processed > 0
+      ? BackgroundFetch.BackgroundFetchResult.NewData
+      : BackgroundFetch.BackgroundFetchResult.NoData;
   } catch (error) {
     console.error('Background task failed:', error);
     return BackgroundFetch.BackgroundFetchResult.Failed;
@@ -1374,17 +1389,32 @@ export async function registerBackgroundProcessing() {
 }
 ```
 
-### Lifespan-Aware Execution
+### Event-Driven Processing
 
-When started with a lifespan, the client will stop gracefully before the deadline:
+The workflow client uses **event-driven processing** with no always-on background loops:
 
 ```typescript
-await client.start({ lifespan: 25000 });  // Process for max 25 seconds
+// Process until queue is empty
+const result = await client.processNow();
+
+// Process with timeout
+const result = await client.processNow({ timeout: 5000 });
+
+// Process for bounded duration (for background tasks)
+const result = await client.processForDuration(25000);
+
+// Returns: { processed: number, reason: 'queue-empty' | 'deadline' | 'stopped' }
 ```
 
+Processing is triggered by:
+- Starting a workflow (auto-triggers)
+- App foreground events
+- Network connectivity changes
+- Explicit `processNow()` calls
+
 The client will:
-- Stop 500ms before the deadline to allow graceful shutdown
-- Continue processing activities until the deadline is reached
+- Process continuously until the queue is empty or deadline is reached
+- Stop gracefully before the deadline to allow cleanup
 
 ---
 

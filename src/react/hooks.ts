@@ -23,7 +23,7 @@
  * ```
  */
 
-import { useEffect, useState, useCallback, useRef } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import {
   WorkflowExecution,
   WorkflowExecutionStatus,
@@ -279,36 +279,24 @@ export function useWorkflowStarter<TInput>(engine: WorkflowEngine) {
 }
 
 /**
- * Hook to run the engine tick loop.
- * Useful for foreground processing when the app is active.
+ * Hook to process pending work when enabled.
+ * This is event-driven - it calls process() on mount and when enabled changes.
+ * There is no polling loop.
+ *
+ * For continuous processing, call processNow() from app lifecycle events
+ * (foreground, network change) rather than using this hook.
  *
  * @param engine - The workflow engine
- * @param enabled - Whether to run the tick loop
- * @param tickInterval - Interval between ticks in ms (default: 100)
+ * @param enabled - Whether to process (triggers on mount and when changed to true)
  */
 export function useEngineRunner(
   engine: WorkflowEngine,
-  enabled: boolean = true,
-  tickInterval: number = 100
+  enabled: boolean = true
 ): void {
-  const isRunningRef = useRef(false);
-
   useEffect(() => {
     if (!enabled) return;
 
-    isRunningRef.current = true;
-
-    const runLoop = async () => {
-      while (isRunningRef.current) {
-        await engine.tick();
-        await new Promise(resolve => setTimeout(resolve, tickInterval));
-      }
-    };
-
-    void runLoop();
-
-    return () => {
-      isRunningRef.current = false;
-    };
-  }, [engine, enabled, tickInterval]);
+    // Process pending work when enabled
+    void engine.process();
+  }, [engine, enabled]);
 }

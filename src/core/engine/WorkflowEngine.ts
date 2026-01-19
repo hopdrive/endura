@@ -16,7 +16,8 @@ import {
   WorkflowExecutionStatus,
   ActivityContext,
   StartWorkflowOptions,
-  TickOptions,
+  ProcessOptions,
+  ProcessResult,
   EngineEvent,
   CleanupConfig,
   WorkflowEngineConfig,
@@ -51,6 +52,8 @@ export class WorkflowEngine {
   private activities: Map<string, Activity> = new Map();
   private isRunning = false;
   private abortController: AbortController | null = null;
+  private processingPromise: Promise<ProcessResult> | null = null;
+  private autoProcess: boolean;
 
   // Track active AbortControllers by runId for cancellation propagation
   private activeAbortControllers: Map<string, { abort: (reason?: unknown) => void }> = new Map();
@@ -63,6 +66,8 @@ export class WorkflowEngine {
     this.logger = config.logger ?? silentLogger;
     this.onEvent = config.onEvent;
     this.cleanup = config.cleanup;
+    // Auto-process is enabled by default for production use, but can be disabled for testing
+    this.autoProcess = config.autoProcess ?? true;
   }
 
   /**
@@ -221,6 +226,9 @@ export class WorkflowEngine {
 
     this.logger.info('Started workflow execution', { runId, workflowName: workflow.name });
 
+    // Auto-trigger processing for the new task
+    this.scheduleImmediateProcess();
+
     return execution;
   }
 
@@ -333,16 +341,25 @@ export class WorkflowEngine {
   }
 
   // ============================================================================
-  // Execution Loop
+  // Processing
   // ============================================================================
 
   /**
-   * Run the engine, processing tasks until stopped or lifespan exceeded.
+   * Process pending tasks until the queue is empty or timeout is reached.
+   * This is the primary way to trigger task execution.
+   *
+   * Returns when:
+   * - No more tasks ready to process (queue empty or all tasks have future scheduledFor)
+   * - Timeout reached (if lifespan specified)
+   * - stop() called
+   *
+   * @returns ProcessResult with count and reason for stopping
    */
-  async run(options?: TickOptions): Promise<void> {
-    if (this.isRunning) {
-      this.logger.warn('Engine is already running');
-      return;
+  async process(options?: ProcessOptions): Promise<ProcessResult> {
+    // Handle concurrent calls - return early if already processing
+    if (this.processingPromise) {
+      this.logger.debug('Already processing, skipping');
+      return { processed: 0, reason: 'already-processing' };
     }
 
     this.isRunning = true;
@@ -350,32 +367,67 @@ export class WorkflowEngine {
     const deadline = options?.lifespan ? this.clock.now() + options.lifespan : null;
     const safetyBuffer = 500;
 
-    this.logger.info('Engine started', { lifespan: options?.lifespan });
+    this.logger.debug('Processing started', { lifespan: options?.lifespan });
+
+    // Create the processing promise
+    this.processingPromise = this.processInternal(deadline, safetyBuffer);
 
     try {
-      while (this.isRunning && !this.abortController.signal.aborted) {
-        // Check deadline
-        if (deadline && this.clock.now() >= deadline - safetyBuffer) {
-          this.logger.info('Approaching deadline, stopping gracefully');
-          break;
-        }
-
-        const processed = await this.tick();
-
-        // If no work was done, sleep briefly
-        if (processed === 0) {
-          await this.scheduler.sleep(100);
-        }
-      }
+      const result = await this.processingPromise;
+      return result;
     } finally {
+      this.processingPromise = null;
       this.isRunning = false;
       this.abortController = null;
-      this.logger.info('Engine stopped');
+      this.logger.debug('Processing stopped');
     }
   }
 
   /**
-   * Stop the running engine.
+   * Internal processing loop.
+   */
+  private async processInternal(deadline: number | null, safetyBuffer: number): Promise<ProcessResult> {
+    let totalProcessed = 0;
+
+    while (this.isRunning && !this.abortController?.signal.aborted) {
+      // Check deadline
+      if (deadline && this.clock.now() >= deadline - safetyBuffer) {
+        this.logger.debug('Approaching deadline, stopping gracefully');
+        return { processed: totalProcessed, reason: 'deadline' };
+      }
+
+      // Get pending tasks
+      const now = this.clock.now();
+      const pendingTasks = await this.storage.getPendingActivityTasks({ limit: 10, now });
+
+      // If no tasks ready, we're done
+      if (pendingTasks.length === 0) {
+        return { processed: totalProcessed, reason: 'queue-empty' };
+      }
+
+      // Process tasks
+      for (const task of pendingTasks) {
+        if (!this.isRunning || this.abortController?.signal.aborted) {
+          return { processed: totalProcessed, reason: 'stopped' };
+        }
+
+        // Check deadline before each task
+        if (deadline && this.clock.now() >= deadline - safetyBuffer) {
+          return { processed: totalProcessed, reason: 'deadline' };
+        }
+
+        const success = await this.processTask(task);
+        if (success) {
+          totalProcessed++;
+        }
+      }
+    }
+
+    return { processed: totalProcessed, reason: 'stopped' };
+  }
+
+  /**
+   * Stop the running processing.
    */
   stop(): void {
     if (!this.isRunning) {
@@ -383,11 +435,42 @@ export class WorkflowEngine {
     }
     this.isRunning = false;
     this.abortController?.abort();
-    this.logger.info('Engine stop requested');
+    this.logger.debug('Processing stop requested');
   }
 
   /**
-   * Process one batch of pending tasks. Returns number of tasks processed.
+   * Schedule immediate processing via microtask to avoid deep recursion.
+   * This is used internally to auto-trigger processing after workflow starts
+   * or activity completions. Can be disabled via autoProcess config option.
+   */
+  private scheduleImmediateProcess(): void {
+    if (!this.autoProcess) {
+      return;
+    }
+    queueMicrotask(() => {
+      if (!this.processingPromise) {
+        this.process().catch(err => {
+          this.logger.error('Auto-process failed', { error: String(err) });
+        });
+      }
+    });
+  }
+
+  /**
+   * Check if there are any pending tasks ready to process.
+   */
+  async hasPendingWork(): Promise<boolean> {
+    const now = this.clock.now();
+    const tasks = await this.storage.getPendingActivityTasks({ limit: 1, now });
+    return tasks.length > 0;
+  }
+
+  /**
+   * Process one batch of pending tasks (up to 10).
+   * Unlike process(), this does NOT loop - it processes once and returns.
+   * Useful for testing and manual step-by-step control.
+   *
+   * @returns Number of tasks processed in this batch
    */
   async tick(): Promise<number> {
     const now = this.clock.now();
@@ -395,11 +478,6 @@ export class WorkflowEngine {
 
     let processed = 0;
     for (const task of pendingTasks) {
-      // Check if we should stop
-      if (!this.isRunning && this.abortController?.signal.aborted) {
-        break;
-      }
-
       const success = await this.processTask(task);
       if (success) {
         processed++;
@@ -648,6 +726,9 @@ export class WorkflowEngine {
         activityName: nextActivity.name,
         index: nextIndex,
       });
+
+      // Auto-trigger processing for the next task
+      this.scheduleImmediateProcess();
     }
   }
 

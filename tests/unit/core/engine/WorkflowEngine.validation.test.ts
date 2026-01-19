@@ -39,6 +39,7 @@ describe('WorkflowEngine - Input Validation', () => {
       clock,
       scheduler,
       environment,
+      autoProcess: false, // Disable auto-processing for manual test control
     });
   }
 

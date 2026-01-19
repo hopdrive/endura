@@ -37,6 +37,7 @@ describe('WorkflowEngine - runWhen Gating', () => {
       clock,
       scheduler,
       environment,
+      autoProcess: false, // Disable auto-processing for manual test control
     });
   }
 

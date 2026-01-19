@@ -37,6 +37,7 @@ describe('WorkflowEngine - Task Lifecycle', () => {
       clock,
       scheduler,
       environment,
+      autoProcess: false, // Disable auto-processing for manual test control
     });
   }
 

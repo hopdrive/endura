@@ -1,6 +1,9 @@
 /**
  * Expo/React Native environment implementation.
  * Provides runtime context like network connectivity and battery level.
+ *
+ * This is an event-driven implementation - no polling loops.
+ * State should be updated by the app via setNetworkState(), setAppState(), etc.
  */
 
 import { Environment, RuntimeContext } from '../../core/types';
@@ -18,12 +21,23 @@ export type NetworkStateProvider = () => Promise<boolean> | boolean;
 export type BatteryLevelProvider = () => Promise<number | undefined> | number | undefined;
 
 /**
+ * Callback for network state changes.
+ */
+export type NetworkChangeCallback = (isConnected: boolean) => void;
+
+/**
  * Options for configuring the Expo environment.
  */
 export interface ExpoEnvironmentOptions {
   /**
+   * Initial network state.
+   * @default true (assume connected)
+   */
+  initialNetworkState?: boolean;
+
+  /**
    * Function to get the current network connectivity state.
-   * If not provided, defaults to assuming connected.
+   * Called on refresh() to fetch current state.
    *
    * Example with @react-native-community/netinfo:
    * ```typescript
@@ -41,7 +55,7 @@ export interface ExpoEnvironmentOptions {
 
   /**
    * Function to get the current battery level (0-1).
-   * If not provided, battery level will be undefined.
+   * Called on refresh() to fetch current state.
    *
    * Example with expo-battery:
    * ```typescript
@@ -66,32 +80,27 @@ export interface ExpoEnvironmentOptions {
 /**
  * Expo environment implementation.
  * Provides runtime context for activities including network state and battery level.
+ *
+ * This implementation is event-driven with NO polling loops.
+ * Update state by calling setNetworkState(), setAppState(), etc.
+ * Or call refresh() to fetch current state from providers.
  */
 export class ExpoEnvironment implements Environment {
   private options: ExpoEnvironmentOptions;
-  private cachedIsConnected: boolean = true;
+  private cachedIsConnected: boolean;
   private cachedBatteryLevel: number | undefined;
   private cachedAppState: 'active' | 'background' | 'inactive' = 'active';
   private cachedLowPowerMode: boolean = false;
 
+  // Network change subscribers
+  private networkChangeCallbacks: Set<NetworkChangeCallback> = new Set();
+
   constructor(options: ExpoEnvironmentOptions = {}) {
     this.options = options;
+    this.cachedIsConnected = options.initialNetworkState ?? true;
 
-    // Start background refresh
-    this.startBackgroundRefresh();
-  }
-
-  /**
-   * Start a background refresh loop to keep cached values up to date.
-   */
-  private startBackgroundRefresh(): void {
-    // Refresh immediately
-    this.refreshCachedValues();
-
-    // Then refresh every second
-    setInterval(() => {
-      this.refreshCachedValues();
-    }, 1000);
+    // Do one initial refresh (async, fire-and-forget)
+    this.refresh().catch(() => {});
   }
 
   isNetworkAvailable(): boolean {
@@ -118,45 +127,16 @@ export class ExpoEnvironment implements Environment {
     };
   }
 
-  private refreshCachedValues(): void {
-    // Get network state
-    if (this.options.getNetworkState) {
-      try {
-        const result = this.options.getNetworkState();
-        if (result instanceof Promise) {
-          result.then(val => { this.cachedIsConnected = val; }).catch(() => {});
-        } else {
-          this.cachedIsConnected = result;
-        }
-      } catch {
-        // Keep previous value on error
-      }
-    }
-
-    // Get battery level
-    if (this.options.getBatteryLevel) {
-      try {
-        const result = this.options.getBatteryLevel();
-        if (result instanceof Promise) {
-          result.then(val => { this.cachedBatteryLevel = val; }).catch(() => {});
-        } else {
-          this.cachedBatteryLevel = result;
-        }
-      } catch {
-        // Keep previous value on error
-      }
-    }
-  }
-
   /**
-   * Force refresh of cached values asynchronously.
-   * Useful when you know network state has changed.
+   * Force refresh of cached values from providers.
+   * Call this when app comes to foreground or before processing.
    */
   async refresh(): Promise<void> {
     // Get network state
     if (this.options.getNetworkState) {
       try {
-        this.cachedIsConnected = await this.options.getNetworkState();
+        const newState = await this.options.getNetworkState();
+        this.setNetworkState(newState);
       } catch {
         // Keep previous value on error
       }
@@ -170,6 +150,53 @@ export class ExpoEnvironment implements Environment {
         // Keep previous value on error
       }
     }
+  }
+
+  /**
+   * Update the network state.
+   * Call this from your app's NetInfo listener.
+   *
+   * @example
+   * ```typescript
+   * NetInfo.addEventListener((state) => {
+   *   environment.setNetworkState(state.isConnected ?? false);
+   * });
+   * ```
+   */
+  setNetworkState(isConnected: boolean): void {
+    const changed = this.cachedIsConnected !== isConnected;
+    this.cachedIsConnected = isConnected;
+
+    // Notify subscribers if state changed
+    if (changed) {
+      for (const callback of this.networkChangeCallbacks) {
+        try {
+          callback(isConnected);
+        } catch {
+          // Ignore callback errors
+        }
+      }
+    }
+  }
+
+  /**
+   * Subscribe to network state changes.
+   * Returns an unsubscribe function.
+   *
+   * @example
+   * ```typescript
+   * const unsubscribe = environment.onNetworkChange((isConnected) => {
+   *   if (isConnected) {
+   *     client.processNow();
+   *   }
+   * });
+   * ```
+   */
+  onNetworkChange(callback: NetworkChangeCallback): () => void {
+    this.networkChangeCallbacks.add(callback);
+    return () => {
+      this.networkChangeCallbacks.delete(callback);
+    };
   }
 
   /**

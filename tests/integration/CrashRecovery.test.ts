@@ -53,6 +53,7 @@ describe('Crash Recovery Integration', () => {
       clock,
       scheduler,
       environment,
+      autoProcess: false, // Disable auto-processing for manual test control
     });
     ctx = { storage, clock, scheduler, environment, engine };
     return engine;
@@ -68,6 +69,7 @@ describe('Crash Recovery Integration', () => {
       clock,
       scheduler,
       environment,
+      autoProcess: false, // Disable auto-processing for manual test control
     });
     ctx = { storage, clock, scheduler, environment, engine };
     return engine;

@@ -281,11 +281,21 @@ export interface StartWorkflowOptions<TInput = Record<string, unknown>> {
 }
 
 /**
- * Options for running the engine tick loop.
+ * Options for processing the queue.
  */
-export interface TickOptions {
-  /** Max time to run in ms (for background mode) */
+export interface ProcessOptions {
+  /** Max time to process in ms (for background tasks) */
   lifespan?: number;
+}
+
+/**
+ * Result of a process() call.
+ */
+export interface ProcessResult {
+  /** Number of tasks processed */
+  processed: number;
+  /** Why processing stopped */
+  reason: 'queue-empty' | 'deadline' | 'stopped' | 'already-processing';
 }
 
 /**
@@ -356,6 +366,12 @@ export interface WorkflowEngineConfig {
   onEvent?: (event: EngineEvent) => void;
   /** Cleanup configuration */
   cleanup?: CleanupConfig;
+  /**
+   * Whether to auto-trigger processing when workflows start or activities complete.
+   * Set to false for testing to enable manual control via tick().
+   * @default true
+   */
+  autoProcess?: boolean;
 }
 
 // ============================================================================

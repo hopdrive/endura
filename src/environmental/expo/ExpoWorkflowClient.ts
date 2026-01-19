@@ -2,10 +2,13 @@
  * Expo Workflow Client - Main entry point for Expo apps.
  * Provides a convenient way to create and configure the workflow engine
  * with Expo-specific runtime adapters.
+ *
+ * This is an event-driven client - no always-on polling loops.
+ * Processing is triggered by calling processNow() or processForDuration().
  */
 
 import { WorkflowEngine } from '../../core/engine';
-import { Storage } from '../../core/types';
+import { Storage, ProcessResult, Workflow, StartWorkflowOptions } from '../../core/types';
 import { ExpoClock } from './ExpoClock';
 import { ExpoScheduler } from './ExpoScheduler';
 import { ExpoEnvironment, ExpoEnvironmentOptions } from './ExpoEnvironment';
@@ -48,6 +51,46 @@ export interface ExpoWorkflowClientOptions {
 /**
  * Expo Workflow Client.
  * Combines the workflow engine with Expo-specific runtime adapters.
+ *
+ * This is an event-driven client. Processing is triggered explicitly:
+ * - Call processNow() when app comes to foreground
+ * - Call processNow() when network state changes
+ * - Call processForDuration() in background fetch handlers
+ * - Starting a workflow auto-triggers processing
+ *
+ * @example
+ * ```typescript
+ * import { SQLiteStorage, ExpoSqliteDriver } from 'endura/storage/sqlite';
+ * import { ExpoWorkflowClient } from 'endura/environmental/expo';
+ * import { openDatabaseAsync } from 'expo-sqlite';
+ *
+ * // Create storage
+ * const driver = await ExpoSqliteDriver.create('workflow.db', openDatabaseAsync);
+ * const storage = new SQLiteStorage(driver);
+ * await storage.initialize();
+ *
+ * // Create client
+ * const client = await ExpoWorkflowClient.create({ storage });
+ *
+ * // Register workflows
+ * client.registerWorkflow(photoWorkflow);
+ *
+ * // Process pending work
+ * await client.processNow();
+ *
+ * // Starting a workflow auto-triggers processing
+ * await client.startWorkflow(photoWorkflow, { input: { moveId: 123 } });
+ *
+ * // In app lifecycle
+ * AppState.addEventListener('change', (state) => {
+ *   if (state === 'active') client.processNow();
+ * });
+ *
+ * NetInfo.addEventListener((state) => {
+ *   client.environment.setNetworkState(state.isConnected ?? false);
+ *   if (state.isConnected) client.processNow();
+ * });
+ * ```
  */
 export class ExpoWorkflowClient {
   readonly engine: WorkflowEngine;
@@ -66,36 +109,6 @@ export class ExpoWorkflowClient {
 
   /**
    * Create a new Expo workflow client.
-   *
-   * @example
-   * ```typescript
-   * import { SQLiteStorage, ExpoSqliteDriver } from 'endura/storage/sqlite';
-   * import { ExpoWorkflowClient } from 'endura/environmental/expo';
-   * import { openDatabaseAsync } from 'expo-sqlite';
-   * import NetInfo from '@react-native-community/netinfo';
-   *
-   * // Create storage
-   * const driver = await ExpoSqliteDriver.create('workflow.db', openDatabaseAsync);
-   * const storage = new SQLiteStorage(driver);
-   * await storage.initialize();
-   *
-   * // Create client
-   * const client = await ExpoWorkflowClient.create({
-   *   storage,
-   *   environment: {
-   *     getNetworkState: async () => {
-   *       const state = await NetInfo.fetch();
-   *       return state.isConnected ?? false;
-   *     },
-   *   },
-   * });
-   *
-   * // Register workflows
-   * client.registerWorkflow(photoWorkflow);
-   *
-   * // Start the engine
-   * await client.start();
-   * ```
    */
   static async create(options: ExpoWorkflowClientOptions): Promise<ExpoWorkflowClient> {
     const storage = options.storage;
@@ -118,85 +131,139 @@ export class ExpoWorkflowClient {
   }
 
   /**
-   * Start the workflow engine.
-   * Begins processing pending activities.
+   * Process pending work immediately.
+   * Returns when queue is empty or timeout is reached.
    *
-   * @param options - Optional configuration for the tick loop
-   * @param options.lifespan - Maximum time to run in milliseconds (useful for background tasks)
-   * @param options.tickInterval - Interval between ticks in milliseconds (default: 100)
+   * This is the primary way to trigger processing in event-driven mode.
+   *
+   * @param options.timeout - Maximum time to process in milliseconds
+   * @returns ProcessResult with count and reason for stopping
+   *
+   * @example
+   * ```typescript
+   * // Process all pending work
+   * const result = await client.processNow();
+   * console.log(`Processed ${result.processed} tasks`);
+   *
+   * // Process with timeout
+   * const result = await client.processNow({ timeout: 5000 });
+   * ```
    */
-  async start(options?: { lifespan?: number; tickInterval?: number }): Promise<void> {
-    const tickInterval = options?.tickInterval ?? 100;
-    const deadline = options?.lifespan ? Date.now() + options.lifespan : null;
-    const safetyBuffer = 500;
-
-    while (true) {
-      // Check deadline
-      if (deadline && Date.now() >= deadline - safetyBuffer) {
-        break;
-      }
-
-      await this.engine.tick();
-
-      // Wait before next tick
-      await new Promise(resolve => setTimeout(resolve, tickInterval));
-
-      // If we processed nothing and no deadline, keep the loop running
-      // In a real app, you might want to add an explicit stop() method
-    }
+  async processNow(options?: { timeout?: number }): Promise<ProcessResult> {
+    return this.engine.process({ lifespan: options?.timeout });
   }
 
   /**
-   * Process a single tick of the workflow engine.
-   * Useful for manual control or testing.
+   * Process work for a bounded time window.
+   * Use this in background fetch handlers where you have a limited time window.
+   *
+   * @param lifespan - Maximum time to process in milliseconds
+   * @returns ProcessResult with count and reason for stopping
+   *
+   * @example
+   * ```typescript
+   * // In background fetch handler (typically ~25 seconds allowed)
+   * const result = await client.processForDuration(25000);
+   * return result.processed > 0
+   *   ? BackgroundFetch.BackgroundFetchResult.NewData
+   *   : BackgroundFetch.BackgroundFetchResult.NoData;
+   * ```
    */
-  async tick(): Promise<void> {
-    await this.engine.tick();
+  async processForDuration(lifespan: number): Promise<ProcessResult> {
+    return this.engine.process({ lifespan });
+  }
+
+  /**
+   * Check if there is pending work ready to process.
+   *
+   * @example
+   * ```typescript
+   * if (await client.hasPendingWork()) {
+   *   await client.processNow();
+   * }
+   * ```
+   */
+  async hasPendingWork(): Promise<boolean> {
+    return this.engine.hasPendingWork();
   }
 
   /**
    * Close the client and release resources.
    */
   async close(): Promise<void> {
+    this.engine.stop();
     if ('close' in this.storage && typeof this.storage.close === 'function') {
       await (this.storage as { close: () => Promise<void> }).close();
     }
   }
 
-  // Delegate common methods to the engine
+  // ============================================================================
+  // Delegated methods
+  // ============================================================================
 
+  /**
+   * Register a workflow with the engine.
+   */
   get registerWorkflow() {
     return this.engine.registerWorkflow.bind(this.engine);
   }
 
-  get start_workflow() {
-    return this.engine.start.bind(this.engine);
+  /**
+   * Start a workflow execution.
+   * This also auto-triggers processing of the new task.
+   */
+  async startWorkflow<TInput extends Record<string, unknown>>(
+    workflow: Workflow<TInput>,
+    options: StartWorkflowOptions<TInput>
+  ) {
+    return this.engine.start(workflow, options);
   }
 
+  /**
+   * Get a workflow execution by runId.
+   */
   get getExecution() {
     return this.engine.getExecution.bind(this.engine);
   }
 
+  /**
+   * Get workflow executions by status.
+   */
   get getExecutionsByStatus() {
     return this.engine.getExecutionsByStatus.bind(this.engine);
   }
 
+  /**
+   * Cancel a workflow execution.
+   */
   get cancelExecution() {
     return this.engine.cancelExecution.bind(this.engine);
   }
 
+  /**
+   * Get all dead letter records.
+   */
   get getDeadLetters() {
     return this.engine.getDeadLetters.bind(this.engine);
   }
 
+  /**
+   * Get unacknowledged dead letter records.
+   */
   get getUnacknowledgedDeadLetters() {
     return this.engine.getUnacknowledgedDeadLetters.bind(this.engine);
   }
 
+  /**
+   * Acknowledge a dead letter record.
+   */
   get acknowledgeDeadLetter() {
     return this.engine.acknowledgeDeadLetter.bind(this.engine);
   }
 
+  /**
+   * Purge dead letter records.
+   */
   get purgeDeadLetters() {
     return this.engine.purgeDeadLetters.bind(this.engine);
   }

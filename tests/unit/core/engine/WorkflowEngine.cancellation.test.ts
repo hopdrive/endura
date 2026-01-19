@@ -37,6 +37,7 @@ describe('WorkflowEngine - Cancellation Propagation', () => {
       clock,
       scheduler,
       environment,
+      autoProcess: false, // Disable auto-processing for manual test control
     });
   }
 

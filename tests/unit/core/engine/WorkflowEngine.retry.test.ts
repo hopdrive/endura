@@ -36,6 +36,7 @@ describe('WorkflowEngine - Retries + Backoff', () => {
       clock,
       scheduler,
       environment,
+      autoProcess: false, // Disable auto-processing for manual test control
     });
   }
 

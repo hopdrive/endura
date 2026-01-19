@@ -31,7 +31,8 @@ export {
 
   // Engine types
   StartWorkflowOptions,
-  TickOptions,
+  ProcessOptions,
+  ProcessResult,
   Logger,
   EngineEventType,
   EngineEvent,
