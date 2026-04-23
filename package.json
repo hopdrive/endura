@@ -88,7 +88,7 @@
     "vitest": "^4.0.16"
   },
   "dependencies": {
-    "uuid": "^9.0.1"
+    "uuid": "^14.0.0"
   },
   "peerDependencies": {
     "expo-sqlite": ">=13.0.0",
