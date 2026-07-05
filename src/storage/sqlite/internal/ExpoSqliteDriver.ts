@@ -13,7 +13,9 @@ interface ExpoSQLiteDatabase {
   execAsync(sql: string): Promise<void>;
   runAsync(sql: string, ...params: unknown[]): Promise<{ changes: number; lastInsertRowId: number }>;
   getAllAsync<T = SQLiteRow>(sql: string, ...params: unknown[]): Promise<T[]>;
-  withTransactionAsync<T>(fn: () => Promise<T>): Promise<T>;
+  // Matches the real expo-sqlite v14+ API: the task's return value is
+  // discarded — withTransactionAsync always resolves to void.
+  withTransactionAsync(task: () => Promise<void>): Promise<void>;
   closeAsync(): Promise<void>;
 }
 
@@ -75,7 +77,18 @@ export class ExpoSqliteDriver implements SQLiteDriver {
   }
 
   async transaction<T>(fn: () => Promise<T>): Promise<T> {
-    return await this.db.withTransactionAsync(fn);
+    // expo-sqlite's withTransactionAsync resolves to void, so the callback's
+    // result must be captured in a closure.
+    let result: T | undefined;
+    let completed = false;
+    await this.db.withTransactionAsync(async () => {
+      result = await fn();
+      completed = true;
+    });
+    if (!completed) {
+      throw new Error('Transaction callback did not run to completion');
+    }
+    return result as T;
   }
 
   async close(): Promise<void> {
