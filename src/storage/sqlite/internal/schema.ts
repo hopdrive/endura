@@ -50,6 +50,8 @@ CREATE TABLE IF NOT EXISTS activity_tasks (
   completed_at INTEGER,
   error TEXT,
   error_stack TEXT,
+  owner_id TEXT,
+  lease_expires_at INTEGER,
   FOREIGN KEY (run_id) REFERENCES executions(run_id) ON DELETE CASCADE
 );
 

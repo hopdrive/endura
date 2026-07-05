@@ -225,7 +225,11 @@ export class InMemoryStorage implements Storage {
     return pending.slice(0, limit);
   }
 
-  async claimActivityTask(taskId: string, now: number): Promise<ActivityTask | null> {
+  async claimActivityTask(
+    taskId: string,
+    now: number,
+    lease?: { ownerId: string; leaseDurationMs: number }
+  ): Promise<ActivityTask | null> {
     const task = this.tasks.get(taskId);
     if (!task || task.status !== 'pending') return null;
 
@@ -237,6 +241,8 @@ export class InMemoryStorage implements Storage {
       status: 'active',
       startedAt: now,
       attempts: task.attempts + 1,
+      ownerId: lease?.ownerId,
+      leaseExpiresAt: lease ? now + lease.leaseDurationMs : undefined,
     };
     this.tasks.set(taskId, claimed);
     this.notifySubscribers({
@@ -246,6 +252,15 @@ export class InMemoryStorage implements Storage {
     });
 
     return { ...claimed };
+  }
+
+  async renewLease(taskId: string, ownerId: string, leaseExpiresAt: number): Promise<boolean> {
+    const task = this.tasks.get(taskId);
+    if (!task || task.status !== 'active' || task.ownerId !== ownerId) {
+      return false;
+    }
+    this.tasks.set(taskId, { ...task, leaseExpiresAt });
+    return true;
   }
 
   // ============================================================================

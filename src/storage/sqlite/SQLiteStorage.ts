@@ -102,6 +102,8 @@ export class SQLiteStorage implements Storage {
       completedAt: row['completed_at'] != null ? Number(row['completed_at']) : undefined,
       error: row['error'] != null ? String(row['error'] as string) : undefined,
       errorStack: row['error_stack'] != null ? String(row['error_stack'] as string) : undefined,
+      ownerId: row['owner_id'] != null ? String(row['owner_id'] as string) : undefined,
+      leaseExpiresAt: row['lease_expires_at'] != null ? Number(row['lease_expires_at']) : undefined,
     };
   }
 
@@ -254,8 +256,9 @@ export class SQLiteStorage implements Storage {
     await this.driver.execute(
       `INSERT OR REPLACE INTO activity_tasks (
         task_id, run_id, activity_name, status, priority, attempts, max_attempts, timeout,
-        input, result, created_at, scheduled_for, started_at, last_attempt_at, completed_at, error, error_stack
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        input, result, created_at, scheduled_for, started_at, last_attempt_at, completed_at, error, error_stack,
+        owner_id, lease_expires_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         task.taskId,
         task.runId,
@@ -274,6 +277,8 @@ export class SQLiteStorage implements Storage {
         task.completedAt ?? null,
         task.error ?? null,
         task.errorStack ?? null,
+        task.ownerId ?? null,
+        task.leaseExpiresAt ?? null,
       ]
     );
 
@@ -370,16 +375,21 @@ export class SQLiteStorage implements Storage {
     return rows.map(row => this.rowToTask(row));
   }
 
-  async claimActivityTask(taskId: string, now: number): Promise<ActivityTask | null> {
+  async claimActivityTask(
+    taskId: string,
+    now: number,
+    lease?: { ownerId: string; leaseDurationMs: number }
+  ): Promise<ActivityTask | null> {
     return await this.driver.transaction(async () => {
       // Compare-and-set: the status guard in the WHERE clause makes the
       // claim atomic — a competing engine's claim shows up as changes === 0.
       const result = await this.driver.execute(
         `UPDATE activity_tasks
-         SET status = 'active', started_at = ?, attempts = attempts + 1
+         SET status = 'active', started_at = ?, attempts = attempts + 1,
+             owner_id = ?, lease_expires_at = ?
          WHERE task_id = ? AND status = 'pending'
            AND (scheduled_for IS NULL OR scheduled_for <= ?)`,
-        [now, taskId, now]
+        [now, lease?.ownerId ?? null, lease ? now + lease.leaseDurationMs : null, taskId, now]
       );
 
       if ((result.changes ?? 0) === 0) {
@@ -400,6 +410,16 @@ export class SQLiteStorage implements Storage {
 
       return claimed;
     });
+  }
+
+  async renewLease(taskId: string, ownerId: string, leaseExpiresAt: number): Promise<boolean> {
+    const result = await this.driver.execute(
+      `UPDATE activity_tasks
+       SET lease_expires_at = ?
+       WHERE task_id = ? AND owner_id = ? AND status = 'active'`,
+      [leaseExpiresAt, taskId, ownerId]
+    );
+    return (result.changes ?? 0) > 0;
   }
 
   // ============================================================================

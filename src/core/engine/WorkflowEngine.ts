@@ -34,6 +34,7 @@ const DEFAULT_MAX_ATTEMPTS = 1;
 const DEFAULT_INITIAL_INTERVAL = 1000;
 const DEFAULT_BACKOFF_COEFFICIENT = 2;
 const DEFAULT_PRIORITY = 0;
+const DEFAULT_LEASE_MS = 60000;
 
 /**
  * The WorkflowEngine orchestrates workflow execution.
@@ -53,6 +54,11 @@ export class WorkflowEngine {
   private abortController: AbortController | null = null;
   private hasReconciled = false;
 
+  // Identifies this engine instance for task leases; every engine (e.g.
+  // foreground app vs background wake) gets its own.
+  private ownerId: string = generateId();
+  private leaseDurationMs: number;
+
   // Track active AbortControllers by runId for cancellation propagation
   private activeAbortControllers: Map<string, { abort: (reason?: unknown) => void }> = new Map();
 
@@ -64,6 +70,7 @@ export class WorkflowEngine {
     this.logger = config.logger ?? silentLogger;
     this.onEvent = config.onEvent;
     this.cleanup = config.cleanup;
+    this.leaseDurationMs = config.leaseDurationMs ?? DEFAULT_LEASE_MS;
   }
 
   /**
@@ -89,13 +96,20 @@ export class WorkflowEngine {
   }
 
   /**
-   * Recover tasks that were active when the engine crashed.
+   * Recover tasks whose owner crashed. Only tasks with a lapsed (or
+   * missing) lease are reclaimed — an unexpired lease means another
+   * engine is live and mid-task (e.g. the foreground engine while we are
+   * a background wake), and resetting its task would run it twice.
    */
   private async recoverActiveTasks(): Promise<void> {
     const activeTasks = await this.storage.getActivityTasksByStatus('active');
     const now = this.clock.now();
 
     for (const task of activeTasks) {
+      if (task.leaseExpiresAt != null && task.leaseExpiresAt > now) {
+        continue;
+      }
+
       this.logger.info('Recovering crashed task', { taskId: task.taskId, activityName: task.activityName });
 
       // Check if max attempts exceeded
@@ -109,6 +123,8 @@ export class WorkflowEngine {
           status: 'pending',
           scheduledFor: now, // Run immediately
           error: 'Recovered from crash',
+          ownerId: undefined,
+          leaseExpiresAt: undefined,
         };
         await this.storage.saveActivityTask(updatedTask);
       }
@@ -500,7 +516,10 @@ export class WorkflowEngine {
     const now = this.clock.now();
 
     // Try to claim the task
-    const claimed = await this.storage.claimActivityTask(task.taskId, now);
+    const claimed = await this.storage.claimActivityTask(task.taskId, now, {
+      ownerId: this.ownerId,
+      leaseDurationMs: this.leaseDurationMs,
+    });
     if (!claimed) {
       return false; // Already claimed or no longer pending
     }
@@ -564,6 +583,26 @@ export class WorkflowEngine {
       }, task.timeout);
     }
 
+    // Heartbeat: renew the lease at half its duration for as long as the
+    // activity runs, so long tasks aren't reclaimed by another engine.
+    let heartbeatStopped = false;
+    let heartbeatHandle: unknown = null;
+    const scheduleHeartbeat = (): void => {
+      heartbeatHandle = this.scheduler.setTimeout(() => {
+        void this.storage
+          .renewLease(task.taskId, this.ownerId, this.clock.now() + this.leaseDurationMs)
+          .then(renewed => {
+            if (renewed && !heartbeatStopped) {
+              scheduleHeartbeat();
+            }
+          })
+          .catch(err => {
+            this.logger.warn('Lease renewal failed', { taskId: task.taskId, error: String(err) });
+          });
+      }, Math.floor(this.leaseDurationMs / 2));
+    };
+    scheduleHeartbeat();
+
     // Create activity context
     const runtimeContext = this.environment.getRuntimeContext();
     const context: ActivityContext = {
@@ -600,6 +639,10 @@ export class WorkflowEngine {
       // Handle failure
       await this.handleTaskFailure(task, activity, error);
     } finally {
+      heartbeatStopped = true;
+      if (heartbeatHandle) {
+        this.scheduler.clearTimeout(heartbeatHandle);
+      }
       // Always clean up the controller reference
       this.activeAbortControllers.delete(task.runId);
     }
@@ -774,6 +817,8 @@ export class WorkflowEngine {
         lastAttemptAt: now,
         error: error.message,
         errorStack: error.stack,
+        ownerId: undefined,
+        leaseExpiresAt: undefined,
       };
       await this.storage.saveActivityTask(retriedTask);
 
@@ -913,6 +958,8 @@ export class WorkflowEngine {
       status: 'pending',
       scheduledFor: now + delay,
       lastAttemptAt: now,
+      ownerId: undefined,
+      leaseExpiresAt: undefined,
     };
     // Decrement attempts since this wasn't a real failure
     skippedTask.attempts = Math.max(0, skippedTask.attempts - 1);
