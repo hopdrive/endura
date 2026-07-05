@@ -265,8 +265,9 @@ describe('WorkflowEngine - Input Validation', () => {
       const execution = await engine.start(workflow, { input: {} });
 
       const tasks = await storage.getActivityTasksForExecution(execution.runId);
-      // Default max attempts is 1 (no retries)
-      expect(tasks[0]?.maxAttempts).toBe(1);
+      // Default max attempts is 3 — durable execution must not default to
+      // at-most-once
+      expect(tasks[0]?.maxAttempts).toBe(3);
     });
 
     it('should use specified retry policy', async () => {

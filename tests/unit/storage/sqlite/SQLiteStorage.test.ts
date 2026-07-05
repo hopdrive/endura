@@ -262,7 +262,7 @@ describe('SQLiteStorage', () => {
       await storage.saveActivityTask(task);
 
       const retrieved = await storage.getActivityTask('task-1');
-      expect(retrieved).toEqual(task);
+      expect(retrieved).toEqual({ ...task, failures: 0 });
     });
 
     it('should return null for non-existent task', async () => {

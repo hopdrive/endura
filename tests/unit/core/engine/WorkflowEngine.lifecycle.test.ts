@@ -230,7 +230,8 @@ describe('WorkflowEngine - Task Lifecycle', () => {
         const activeTask: ActivityTask = {
           ...task,
           status: 'active',
-          attempts: 2, // Already at max
+          attempts: 2,
+          failures: 2, // Failure budget already exhausted before the crash
           startedAt: clock.now(),
         };
         await storage.saveActivityTask(activeTask);

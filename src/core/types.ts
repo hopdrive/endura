@@ -73,9 +73,11 @@ export interface ActivityTask {
   /** Higher = processed first */
   priority: number;
 
-  /** Current attempt count */
+  /** Claim count: how many times an engine picked this task up (includes claims lost to crashes) */
   attempts: number;
-  /** Max before marking failed */
+  /** Recorded execution failures (exceptions/timeouts) — this, not attempts, drives retry exhaustion */
+  failures?: number;
+  /** Max failures before marking failed */
   maxAttempts: number;
   /** Ms before task times out (0 = no timeout) */
   timeout: number;

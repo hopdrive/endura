@@ -30,7 +30,10 @@ import { conditions } from '../conditions';
 
 // Default activity options
 const DEFAULT_TIMEOUT = 25000;
-const DEFAULT_MAX_ATTEMPTS = 1;
+// Max FAILURES before dead-lettering. A durable-execution engine must not
+// default to at-most-once (the old default of 1 meant a single flaky
+// network error permanently failed the workflow).
+const DEFAULT_MAX_ATTEMPTS = 3;
 const DEFAULT_INITIAL_INTERVAL = 1000;
 const DEFAULT_BACKOFF_COEFFICIENT = 2;
 const DEFAULT_PRIORITY = 0;
@@ -112,9 +115,11 @@ export class WorkflowEngine {
 
       this.logger.info('Recovering crashed task', { taskId: task.taskId, activityName: task.activityName });
 
-      // Check if max attempts exceeded
-      if (task.attempts >= task.maxAttempts) {
-        // Move to failed state
+      // A crash (app kill, OS suspend) is not a failure — only recorded
+      // failures count toward exhaustion, so recovery never burns an
+      // attempt. Killing the app mid-task is routine on mobile.
+      if ((task.failures ?? 0) >= task.maxAttempts) {
+        // Already out of failure budget before the crash — finish the job.
         await this.handleTaskPermanentFailure(task, new Error('Crashed during execution'));
       } else {
         // Reset to pending for retry
@@ -799,12 +804,15 @@ export class WorkflowEngine {
       }
     }
 
-    // Check if we should retry
-    if (task.attempts < task.maxAttempts) {
+    // Only real failures count toward exhaustion — attempts is the claim
+    // count and includes claims lost to crashes.
+    const failures = (task.failures ?? 0) + 1;
+
+    if (failures < task.maxAttempts) {
       // Schedule retry with backoff
       const retryOpts = activity.options?.retry ?? {};
       const delay = calculateBackoffDelay(
-        task.attempts,
+        failures,
         retryOpts.initialInterval ?? DEFAULT_INITIAL_INTERVAL,
         retryOpts.backoffCoefficient ?? DEFAULT_BACKOFF_COEFFICIENT,
         retryOpts.maximumInterval
@@ -813,6 +821,7 @@ export class WorkflowEngine {
       const retriedTask: ActivityTask = {
         ...task,
         status: 'pending',
+        failures,
         scheduledFor: now + delay,
         lastAttemptAt: now,
         error: error.message,
@@ -824,13 +833,13 @@ export class WorkflowEngine {
 
       this.logger.debug('Scheduled retry', {
         taskId: task.taskId,
-        attempt: task.attempts,
+        failures,
         maxAttempts: task.maxAttempts,
         delay,
       });
     } else {
       // Permanent failure
-      await this.handleTaskPermanentFailure(task, error);
+      await this.handleTaskPermanentFailure({ ...task, failures }, error);
     }
   }
 

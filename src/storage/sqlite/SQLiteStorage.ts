@@ -91,6 +91,7 @@ export class SQLiteStorage implements Storage {
       status: row['status'] as ActivityTaskStatus,
       priority: row['priority'] as number,
       attempts: row['attempts'] as number,
+      failures: row['failures'] != null ? Number(row['failures']) : 0,
       maxAttempts: row['max_attempts'] as number,
       timeout: row['timeout'] as number,
       input: JSON.parse(row['input'] as string),
@@ -255,10 +256,10 @@ export class SQLiteStorage implements Storage {
 
     await this.driver.execute(
       `INSERT OR REPLACE INTO activity_tasks (
-        task_id, run_id, activity_name, status, priority, attempts, max_attempts, timeout,
+        task_id, run_id, activity_name, status, priority, attempts, failures, max_attempts, timeout,
         input, result, created_at, scheduled_for, started_at, last_attempt_at, completed_at, error, error_stack,
         owner_id, lease_expires_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         task.taskId,
         task.runId,
@@ -266,6 +267,7 @@ export class SQLiteStorage implements Storage {
         task.status,
         task.priority,
         task.attempts,
+        task.failures ?? 0,
         task.maxAttempts,
         task.timeout,
         JSON.stringify(task.input),

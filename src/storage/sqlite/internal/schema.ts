@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS activity_tasks (
   status TEXT NOT NULL CHECK(status IN ('pending', 'active', 'completed', 'failed', 'skipped')),
   priority INTEGER NOT NULL DEFAULT 0,
   attempts INTEGER NOT NULL DEFAULT 0,
+  failures INTEGER NOT NULL DEFAULT 0,
   max_attempts INTEGER NOT NULL DEFAULT 1,
   timeout INTEGER NOT NULL DEFAULT 25000,
   input TEXT NOT NULL,
