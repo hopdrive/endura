@@ -39,6 +39,17 @@ export class SQLiteStorage implements Storage {
   async initialize(): Promise<void> {
     if (this.initialized) return;
 
+    // Connection pragmas, before any other statement:
+    // - WAL allows a reader/writer pair across the foreground and
+    //   background engine connections (no-op for in-memory databases).
+    // - busy_timeout makes a locked database wait instead of throwing
+    //   SQLITE_BUSY immediately.
+    // - foreign_keys is OFF by default in expo-sqlite, which would leave
+    //   the schema's ON DELETE CASCADE inert on-device.
+    await this.driver.query('PRAGMA journal_mode = WAL');
+    await this.driver.query('PRAGMA busy_timeout = 5000');
+    await this.driver.execute('PRAGMA foreign_keys = ON');
+
     const storedVersion = await this.getUserVersion();
     const hasSchema = await this.hasExistingSchema();
 

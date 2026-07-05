@@ -479,7 +479,17 @@ export class WorkflowEngine {
           break;
         }
 
-        const processed = await this.tick();
+        let processed = 0;
+        try {
+          processed = await this.tick();
+        } catch (err) {
+          // tick() contains task-level errors itself; this is the
+          // backstop for anything unexpected. Back off so a persistent
+          // storage failure doesn't spin a hot error loop.
+          this.logger.error('Tick failed', { error: String(err) });
+          await this.scheduler.sleep(1000);
+          continue;
+        }
 
         // If no work was done, sleep briefly
         if (processed === 0) {
@@ -513,11 +523,21 @@ export class WorkflowEngine {
     // been registered by the time stranded executions are repaired.
     if (!this.hasReconciled) {
       this.hasReconciled = true;
-      await this.reconcileStrandedExecutions();
+      try {
+        await this.reconcileStrandedExecutions();
+      } catch (err) {
+        this.logger.error('Reconciliation failed', { error: String(err) });
+      }
     }
 
     const now = this.clock.now();
-    const pendingTasks = await this.storage.getPendingActivityTasks({ limit: 10, now });
+    let pendingTasks: ActivityTask[];
+    try {
+      pendingTasks = await this.storage.getPendingActivityTasks({ limit: 10, now });
+    } catch (err) {
+      this.logger.error('Failed to fetch pending tasks', { error: String(err) });
+      return 0;
+    }
 
     let processed = 0;
     for (const task of pendingTasks) {
@@ -526,9 +546,16 @@ export class WorkflowEngine {
         break;
       }
 
-      const success = await this.processTask(task);
-      if (success) {
-        processed++;
+      try {
+        const success = await this.processTask(task);
+        if (success) {
+          processed++;
+        }
+      } catch (err) {
+        // One task's storage failure (SQLITE_BUSY, poison row) must not
+        // kill the loop — the task stays claimable/leased and is retried
+        // or recovered on a later tick.
+        this.logger.error('Task processing failed', { taskId: task.taskId, error: String(err) });
       }
     }
 
@@ -644,8 +671,39 @@ export class WorkflowEngine {
     };
 
     try {
-      // Execute the activity
-      const result = await activity.execute(context);
+      // Race the activity against the abort signal. Awaiting the handler
+      // directly would let one hung handler (that ignores ctx.signal)
+      // wedge the serial engine forever. Once the abort wins, any late
+      // settlement of the handler is dropped — the failure already
+      // recorded must not be overwritten (stale-success guard).
+      const executePromise = Promise.resolve(activity.execute(context));
+      executePromise.catch(() => {
+        // Late rejection from a timed-out/abandoned handler: already
+        // handled (or superseded) via the race — never let it surface
+        // as an unhandled rejection.
+      });
+
+      let result: unknown;
+      if (task.timeout > 0) {
+        const abortPromise = new Promise<never>((_, reject) => {
+          const fail = () => {
+            const reason: unknown = signal.reason;
+            reject(
+              reason instanceof Error
+                ? reason
+                : new Error(typeof reason === 'string' ? reason : 'Activity aborted')
+            );
+          };
+          if (signal.aborted) {
+            fail();
+          } else {
+            signal.addEventListener('abort', fail, { once: true });
+          }
+        });
+        result = await Promise.race([executePromise, abortPromise]);
+      } else {
+        result = await executePromise;
+      }
 
       // Clear timeout
       if (timeoutHandle) {
