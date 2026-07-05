@@ -74,7 +74,6 @@
     "@types/better-sqlite3": "^7.6.8",
     "@types/node": "^20.11.0",
     "@types/react": "^18.2.0",
-    "@types/uuid": "^9.0.8",
     "@typescript-eslint/eslint-plugin": "^8.51.0",
     "@typescript-eslint/parser": "^8.51.0",
     "@vitest/coverage-v8": "^4.0.16",
@@ -87,18 +86,19 @@
     "typescript-eslint": "^8.51.0",
     "vitest": "^4.0.16"
   },
-  "dependencies": {
-    "uuid": "^9.0.1"
-  },
   "peerDependencies": {
     "expo-sqlite": ">=13.0.0",
-    "react": ">=18.0.0"
+    "react": ">=18.0.0",
+    "expo-crypto": ">=12.0.0"
   },
   "peerDependenciesMeta": {
     "expo-sqlite": {
       "optional": true
     },
     "react": {
+      "optional": true
+    },
+    "expo-crypto": {
       "optional": true
     }
   },

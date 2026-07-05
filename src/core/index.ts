@@ -75,6 +75,7 @@ export {
 // Utils
 export {
   generateId,
+  setIdGenerator,
   calculateBackoffDelay,
   mergeState,
   createAbortController,

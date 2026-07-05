@@ -2,13 +2,53 @@
  * Utility functions for the workflow engine.
  */
 
-import { v4 as uuidv4 } from 'uuid';
+type IdGenerator = () => string;
+
+let idGenerator: IdGenerator | null = null;
 
 /**
- * Generate a unique identifier.
+ * Override the ID source. The Expo integration wires this to
+ * expo-crypto's randomUUID, which is the only reliable source on Hermes
+ * (Hermes ships neither crypto.randomUUID nor crypto.getRandomValues).
+ */
+export function setIdGenerator(fn: IdGenerator | null): void {
+  idGenerator = fn;
+}
+
+interface CryptoLike {
+  randomUUID?: () => string;
+  getRandomValues?: (array: Uint8Array) => Uint8Array;
+}
+
+/**
+ * Generate a unique identifier (UUID v4).
+ *
+ * Resolution order: injected generator (expo-crypto on device) →
+ * crypto.randomUUID (Node, browsers) → crypto.getRandomValues. Throws a
+ * clear error instead of crashing deep inside a dependency when no
+ * secure random source exists.
  */
 export function generateId(): string {
-  return uuidv4();
+  if (idGenerator) {
+    return idGenerator();
+  }
+
+  const cryptoObj = (globalThis as { crypto?: CryptoLike }).crypto;
+  if (cryptoObj?.randomUUID) {
+    return cryptoObj.randomUUID();
+  }
+  if (cryptoObj?.getRandomValues) {
+    const bytes = cryptoObj.getRandomValues(new Uint8Array(16));
+    bytes[6] = (bytes[6]! & 0x0f) | 0x40; // version 4
+    bytes[8] = (bytes[8]! & 0x3f) | 0x80; // variant 10
+    const hex = Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  }
+
+  throw new Error(
+    'No secure random source available. On React Native/Hermes, install expo-crypto ' +
+      '(the endura Expo integration wires it automatically) or call setIdGenerator().'
+  );
 }
 
 /**
