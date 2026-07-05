@@ -347,35 +347,26 @@ export class SQLiteStorage implements Storage {
   }
 
   async claimActivityTask(taskId: string, now: number): Promise<ActivityTask | null> {
-    // Use a transaction to ensure atomic claim
     return await this.driver.transaction(async () => {
-      // Check if task is still claimable
-      const rows = await this.driver.query(
-        `SELECT * FROM activity_tasks
-         WHERE task_id = ? AND status = 'pending'
-           AND (scheduled_for IS NULL OR scheduled_for <= ?)`,
-        [taskId, now]
-      );
-
-      if (rows.length === 0) return null;
-
-      const task = this.rowToTask(rows[0]!);
-
-      // Update to claimed
-      await this.driver.execute(
+      // Compare-and-set: the status guard in the WHERE clause makes the
+      // claim atomic — a competing engine's claim shows up as changes === 0.
+      const result = await this.driver.execute(
         `UPDATE activity_tasks
          SET status = 'active', started_at = ?, attempts = attempts + 1
-         WHERE task_id = ?`,
-        [now, taskId]
+         WHERE task_id = ? AND status = 'pending'
+           AND (scheduled_for IS NULL OR scheduled_for <= ?)`,
+        [now, taskId, now]
       );
 
-      // Return the claimed task with updated values
-      const claimed: ActivityTask = {
-        ...task,
-        status: 'active',
-        startedAt: now,
-        attempts: task.attempts + 1,
-      };
+      if ((result.changes ?? 0) === 0) {
+        return null; // not claimable, or another engine won the race
+      }
+
+      const rows = await this.driver.query(
+        `SELECT * FROM activity_tasks WHERE task_id = ?`,
+        [taskId]
+      );
+      const claimed = this.rowToTask(rows[0]!);
 
       this.notifySubscribers({
         type: 'task',

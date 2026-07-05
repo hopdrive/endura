@@ -23,6 +23,7 @@ interface BetterSqlite3Statement {
  */
 export class BetterSqlite3Driver implements SQLiteDriver {
   private db: BetterSqlite3Database;
+  private transactionDepth = 0;
 
   constructor(db: BetterSqlite3Database) {
     this.db = db;
@@ -59,10 +60,25 @@ export class BetterSqlite3Driver implements SQLiteDriver {
   }
 
   async transaction<T>(fn: () => Promise<T>): Promise<T> {
-    // better-sqlite3 transactions are synchronous, but we need async for interface compatibility
-    // For testing purposes, we simply run the async function
-    // Real transactions would need proper BEGIN/COMMIT/ROLLBACK
-    return await fn();
+    // Nested calls join the outer transaction — SQLite cannot BEGIN inside
+    // an open transaction, and callers compose (e.g. storage.transaction()
+    // wrapping a claim that itself uses a transaction).
+    if (this.transactionDepth > 0) {
+      return await fn();
+    }
+
+    this.db.exec('BEGIN IMMEDIATE');
+    this.transactionDepth++;
+    try {
+      const result = await fn();
+      this.db.exec('COMMIT');
+      return result;
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    } finally {
+      this.transactionDepth--;
+    }
   }
 
   async close(): Promise<void> {
