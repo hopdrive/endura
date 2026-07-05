@@ -407,9 +407,14 @@ describe('WorkflowEngine - Task Lifecycle', () => {
       const tasks = await storage.getActivityTasksForExecution(execution.runId);
       const taskId = tasks[0]?.taskId;
 
-      // Manually claim the task before tick
+      // Another engine claims the task (with a live lease) before tick.
+      // A leaseless active task would rightly be treated as abandoned
+      // and reclaimed by periodic lease recovery.
       if (taskId) {
-        await storage.claimActivityTask(taskId, clock.now());
+        await storage.claimActivityTask(taskId, clock.now(), {
+          ownerId: 'other-engine',
+          leaseDurationMs: 60000,
+        });
       }
 
       // Tick should not process the already-claimed task

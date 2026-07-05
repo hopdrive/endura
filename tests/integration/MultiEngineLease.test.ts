@@ -150,6 +150,51 @@ describe('multi-engine leasing (C3)', () => {
     expect((await storage.getExecution(execution.runId))!.status).toBe('completed');
   });
 
+  it('reclaims an expired lease during ticking, without an engine restart', async () => {
+    const storage = new InMemoryStorage();
+    const clock = new MockClock(1000000);
+
+    let executions = 0;
+    const workflow: Workflow = {
+      name: 'leased',
+      activities: [
+        defineActivity({
+          name: 'work',
+          execute: async () => {
+            executions++;
+            return { done: true };
+          },
+          retry: { maximumAttempts: 3 },
+        }),
+      ],
+    };
+
+    // The engine is ALREADY running when another engine's task dies: an
+    // app relaunched inside the lease window boots, sees an unexpired
+    // lease (correctly skips it), and must still pick the task up once
+    // the lease lapses — recovery cannot happen only at create().
+    const a = await createEngine(storage, clock, { leaseDurationMs: 5000 });
+    a.engine.registerWorkflow(workflow);
+    const execution = await a.engine.start(workflow, { input: {} });
+    const task = (await storage.getActivityTasksForExecution(execution.runId))[0]!;
+    await storage.claimActivityTask(task.taskId, clock.now(), {
+      ownerId: 'dead-engine',
+      leaseDurationMs: 5000,
+    });
+
+    // Lease still live: nothing to do.
+    await a.engine.tick();
+    expect((await storage.getActivityTasksForExecution(execution.runId))[0]!.status).toBe('active');
+    expect(executions).toBe(0);
+
+    // Lease lapses while THIS engine keeps ticking.
+    clock.advance(6000);
+    await a.engine.tick();
+
+    expect(executions).toBe(1);
+    expect((await storage.getExecution(execution.runId))!.status).toBe('completed');
+  });
+
   it('renews the lease via heartbeat while a long activity runs', async () => {
     const storage = new InMemoryStorage();
     const clock = new MockClock(1000000);

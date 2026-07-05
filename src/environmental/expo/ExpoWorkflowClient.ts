@@ -62,6 +62,13 @@ export interface ExpoWorkflowClientOptions {
     taskId?: string;
     [key: string]: unknown;
   }) => void;
+
+  /**
+   * How long a claimed task's lease lasts before other engines may
+   * reclaim it. See WorkflowEngineConfig.leaseDurationMs.
+   * @default 60000
+   */
+  leaseDurationMs?: number;
 }
 
 /**
@@ -133,6 +140,7 @@ export class ExpoWorkflowClient {
       scheduler,
       environment,
       onEvent: options.onEvent,
+      leaseDurationMs: options.leaseDurationMs,
     });
 
     return new ExpoWorkflowClient(engine, storage, environment);

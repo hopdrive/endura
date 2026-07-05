@@ -56,6 +56,7 @@ export class WorkflowEngine {
   private isRunning = false;
   private abortController: AbortController | null = null;
   private hasReconciled = false;
+  private nextLeaseRecoveryAt = 0;
 
   // Identifies this engine instance for task leases; every engine (e.g.
   // foreground app vs background wake) gets its own.
@@ -531,6 +532,20 @@ export class WorkflowEngine {
     }
 
     const now = this.clock.now();
+
+    // Recovery cannot run only at create(): an engine booted inside
+    // another engine's lease window correctly skips the leased task then,
+    // but must still reclaim it once the lease lapses. Re-scan on a
+    // half-lease cadence.
+    if (now >= this.nextLeaseRecoveryAt) {
+      this.nextLeaseRecoveryAt = now + Math.max(1000, Math.floor(this.leaseDurationMs / 2));
+      try {
+        await this.recoverActiveTasks();
+      } catch (err) {
+        this.logger.error('Lease recovery failed', { error: String(err) });
+      }
+    }
+
     let pendingTasks: ActivityTask[];
     try {
       pendingTasks = await this.storage.getPendingActivityTasks({ limit: 10, now });
