@@ -18,6 +18,7 @@ export class InMemoryStorage implements Storage {
   private tasks = new Map<string, ActivityTask>();
   private deadLetters = new Map<string, DeadLetterRecord>();
   private subscribers: Set<(change: StorageChange) => void> = new Set();
+  private transactionDepth = 0;
 
   private makeUniqueKeyId(workflowName: string, key: string): string {
     return `${workflowName}:${key}`;
@@ -161,6 +162,39 @@ export class InMemoryStorage implements Storage {
     }
     for (const taskId of toDelete) {
       await this.deleteActivityTask(taskId);
+    }
+  }
+
+  // ============================================================================
+  // Atomicity
+  // ============================================================================
+
+  async transaction<T>(fn: () => Promise<T>): Promise<T> {
+    // Nested calls join the outer transaction.
+    if (this.transactionDepth > 0) {
+      return await fn();
+    }
+
+    // Records are replaced, never mutated in place, so shallow map
+    // snapshots are enough to restore pre-transaction state.
+    const snapshot = {
+      executions: new Map(this.executions),
+      uniqueKeys: new Map(this.uniqueKeys),
+      tasks: new Map(this.tasks),
+      deadLetters: new Map(this.deadLetters),
+    };
+
+    this.transactionDepth++;
+    try {
+      return await fn();
+    } catch (error) {
+      this.executions = snapshot.executions;
+      this.uniqueKeys = snapshot.uniqueKeys;
+      this.tasks = snapshot.tasks;
+      this.deadLetters = snapshot.deadLetters;
+      throw error;
+    } finally {
+      this.transactionDepth--;
     }
   }
 

@@ -51,6 +51,7 @@ export class WorkflowEngine {
   private activities: Map<string, Activity> = new Map();
   private isRunning = false;
   private abortController: AbortController | null = null;
+  private hasReconciled = false;
 
   // Track active AbortControllers by runId for cancellation propagation
   private activeAbortControllers: Map<string, { abort: (reason?: unknown) => void }> = new Map();
@@ -111,6 +112,80 @@ export class WorkflowEngine {
         };
         await this.storage.saveActivityTask(updatedTask);
       }
+    }
+  }
+
+  /**
+   * Repair 'running' executions that have no pending or active task.
+   * A crash between the completed-task write and the advance (or between
+   * the execution insert and the first task insert) leaves a workflow
+   * 'running' with nothing scheduled — without this pass it would hang
+   * forever, since crash recovery only scans 'active' tasks.
+   */
+  private async reconcileStrandedExecutions(): Promise<void> {
+    const now = this.clock.now();
+    const running = await this.storage.getExecutionsByStatus('running');
+
+    for (const execution of running) {
+      const tasks = await this.storage.getActivityTasksForExecution(execution.runId);
+      const hasFrontierTask = tasks.some(t => t.status === 'pending' || t.status === 'active');
+      if (hasFrontierTask) continue;
+
+      const workflow = this.workflows.get(execution.workflowName);
+      if (!workflow) {
+        this.logger.warn('Stranded execution references unregistered workflow', {
+          runId: execution.runId,
+          workflowName: execution.workflowName,
+        });
+        continue;
+      }
+
+      const currentTask = tasks.find(t => t.activityName === execution.currentActivityName);
+
+      if (currentTask?.status === 'completed') {
+        // The activity finished but the advance was lost — replay it.
+        this.logger.info('Reconciling stranded execution: replaying advance', {
+          runId: execution.runId,
+          activityName: currentTask.activityName,
+        });
+        await this.storage.transaction(async () => {
+          await this.advanceWorkflow(currentTask, currentTask.result);
+        });
+        continue;
+      }
+
+      if (currentTask?.status === 'failed') {
+        // The task failed but the execution was never marked failed.
+        this.logger.info('Reconciling stranded execution: marking failed', {
+          runId: execution.runId,
+          activityName: currentTask.activityName,
+        });
+        await this.storage.saveExecution({
+          ...execution,
+          status: 'failed',
+          error: currentTask.error ?? 'Activity failed',
+          failedActivityName: currentTask.activityName,
+          updatedAt: now,
+          completedAt: now,
+        });
+        continue;
+      }
+
+      // No record of the frontier activity at all — schedule it.
+      const activity = workflow.activities[execution.currentActivityIndex];
+      if (!activity || activity.name !== execution.currentActivityName) {
+        this.logger.warn('Cannot reconcile stranded execution: activity mismatch', {
+          runId: execution.runId,
+          expected: execution.currentActivityName,
+          found: activity?.name,
+        });
+        continue;
+      }
+      this.logger.info('Reconciling stranded execution: scheduling frontier task', {
+        runId: execution.runId,
+        activityName: activity.name,
+      });
+      await this.scheduleActivityTask(execution, activity, execution.state);
     }
   }
 
@@ -207,10 +282,13 @@ export class WorkflowEngine {
       updatedAt: now,
     };
 
-    await this.storage.saveExecution(execution);
-
-    // Create first activity task
-    await this.scheduleActivityTask(execution, firstActivity, execution.state);
+    // The execution row and its first task must land together — a crash
+    // between the two writes strands the workflow 'running' with nothing
+    // scheduled to run.
+    await this.storage.transaction(async () => {
+      await this.storage.saveExecution(execution);
+      await this.scheduleActivityTask(execution, firstActivity, execution.state);
+    });
 
     this.emitEvent({
       type: 'execution:started',
@@ -296,22 +374,21 @@ export class WorkflowEngine {
     const now = this.clock.now();
     const workflow = this.workflows.get(execution.workflowName);
 
-    // 2. Update execution status
+    // 2-4. Update execution status, delete pending tasks, and release the
+    // uniqueness constraint atomically.
     const updatedExecution: WorkflowExecution = {
       ...execution,
       status: 'cancelled',
       updatedAt: now,
       completedAt: now,
     };
-    await this.storage.saveExecution(updatedExecution);
-
-    // 3. Delete pending tasks for this execution
-    await this.storage.deleteActivityTasksForExecution(runId);
-
-    // 4. Release uniqueness constraint
-    if (execution.uniqueKey) {
-      await this.storage.deleteUniqueKey(execution.workflowName, execution.uniqueKey);
-    }
+    await this.storage.transaction(async () => {
+      await this.storage.saveExecution(updatedExecution);
+      await this.storage.deleteActivityTasksForExecution(runId);
+      if (execution.uniqueKey) {
+        await this.storage.deleteUniqueKey(execution.workflowName, execution.uniqueKey);
+      }
+    });
 
     // 5. Invoke callback
     if (workflow?.onCancelled) {
@@ -390,6 +467,13 @@ export class WorkflowEngine {
    * Process one batch of pending tasks. Returns number of tasks processed.
    */
   async tick(): Promise<number> {
+    // Runs once per engine instance, on the first tick, so workflows have
+    // been registered by the time stranded executions are repaired.
+    if (!this.hasReconciled) {
+      this.hasReconciled = true;
+      await this.reconcileStrandedExecutions();
+    }
+
     const now = this.clock.now();
     const pendingTasks = await this.storage.getPendingActivityTasks({ limit: 10, now });
 
@@ -539,29 +623,35 @@ export class WorkflowEngine {
       completedAt: now,
       lastAttemptAt: now,
     };
-    await this.storage.saveActivityTask(completedTask);
 
-    // Call onSuccess callback
-    if (activity.options?.onSuccess) {
-      try {
-        await activity.options.onSuccess(task.taskId, task.input, result ?? {});
-      } catch (err) {
-        this.logger.error('onSuccess callback error', { taskId: task.taskId, error: String(err) });
+    // The completed-task write and the advance (execution update + next
+    // task) must commit atomically — a crash between them strands the
+    // workflow 'running' with no frontier task.
+    await this.storage.transaction(async () => {
+      await this.storage.saveActivityTask(completedTask);
+
+      // Call onSuccess callback
+      if (activity.options?.onSuccess) {
+        try {
+          await activity.options.onSuccess(task.taskId, task.input, result ?? {});
+        } catch (err) {
+          this.logger.error('onSuccess callback error', { taskId: task.taskId, error: String(err) });
+        }
       }
-    }
 
-    this.emitEvent({
-      type: 'activity:completed',
-      timestamp: now,
-      runId: task.runId,
-      taskId: task.taskId,
-      activityName: task.activityName,
+      this.emitEvent({
+        type: 'activity:completed',
+        timestamp: now,
+        runId: task.runId,
+        taskId: task.taskId,
+        activityName: task.activityName,
+      });
+
+      this.logger.debug('Activity completed', { taskId: task.taskId, activityName: task.activityName });
+
+      // Advance the workflow
+      await this.advanceWorkflow(task, result);
     });
-
-    this.logger.debug('Activity completed', { taskId: task.taskId, activityName: task.activityName });
-
-    // Advance the workflow
-    await this.advanceWorkflow(task, result);
   }
 
   /**
@@ -717,84 +807,90 @@ export class WorkflowEngine {
       error: error.message,
       errorStack: error.stack,
     };
-    await this.storage.saveActivityTask(failedTask);
 
-    // Call onFailed callback
-    if (activity?.options?.onFailed) {
-      try {
-        await activity.options.onFailed(task.taskId, task.input, error);
-      } catch (err) {
-        this.logger.error('onFailed callback error', { taskId: task.taskId, error: String(err) });
-      }
-    }
+    // Failed task, dead letter, and failed execution must commit
+    // atomically — a partial write leaves the workflow 'running' with a
+    // dead frontier task, or a DLQ entry with a live execution.
+    await this.storage.transaction(async () => {
+      await this.storage.saveActivityTask(failedTask);
 
-    // Move to dead letter queue
-    const deadLetter: DeadLetterRecord = {
-      id: generateId(),
-      runId: task.runId,
-      taskId: task.taskId,
-      activityName: task.activityName,
-      workflowName: execution?.workflowName ?? 'unknown',
-      input: task.input,
-      error: error.message,
-      errorStack: error.stack,
-      attempts: task.attempts,
-      failedAt: now,
-      acknowledged: false,
-    };
-    await this.storage.saveDeadLetter(deadLetter);
-
-    this.emitEvent({
-      type: 'activity:failed',
-      timestamp: now,
-      runId: task.runId,
-      taskId: task.taskId,
-      activityName: task.activityName,
-      error: error.message,
-    });
-
-    this.emitEvent({
-      type: 'deadletter:added',
-      timestamp: now,
-      runId: task.runId,
-      taskId: task.taskId,
-      activityName: task.activityName,
-    });
-
-    // Mark workflow as failed
-    if (execution) {
-      const failedExecution: WorkflowExecution = {
-        ...execution,
-        status: 'failed',
-        error: error.message,
-        failedActivityName: task.activityName,
-        updatedAt: now,
-        completedAt: now,
-      };
-      await this.storage.saveExecution(failedExecution);
-
-      // Release uniqueness constraint
-      if (execution.uniqueKey) {
-        await this.storage.deleteUniqueKey(execution.workflowName, execution.uniqueKey);
-      }
-
-      // Invoke workflow failure callback
-      if (workflow?.onFailed) {
+      // Call onFailed callback
+      if (activity?.options?.onFailed) {
         try {
-          await workflow.onFailed(execution.runId, execution.state, error);
+          await activity.options.onFailed(task.taskId, task.input, error);
         } catch (err) {
-          this.logger.error('onFailed callback error', { runId: execution.runId, error: String(err) });
+          this.logger.error('onFailed callback error', { taskId: task.taskId, error: String(err) });
         }
       }
 
+      // Move to dead letter queue
+      const deadLetter: DeadLetterRecord = {
+        id: generateId(),
+        runId: task.runId,
+        taskId: task.taskId,
+        activityName: task.activityName,
+        workflowName: execution?.workflowName ?? 'unknown',
+        input: task.input,
+        error: error.message,
+        errorStack: error.stack,
+        attempts: task.attempts,
+        failedAt: now,
+        acknowledged: false,
+      };
+      await this.storage.saveDeadLetter(deadLetter);
+
       this.emitEvent({
-        type: 'execution:failed',
+        type: 'activity:failed',
         timestamp: now,
-        runId: execution.runId,
-        workflowName: execution.workflowName,
+        runId: task.runId,
+        taskId: task.taskId,
+        activityName: task.activityName,
         error: error.message,
       });
-    }
+
+      this.emitEvent({
+        type: 'deadletter:added',
+        timestamp: now,
+        runId: task.runId,
+        taskId: task.taskId,
+        activityName: task.activityName,
+      });
+
+      // Mark workflow as failed
+      if (execution) {
+        const failedExecution: WorkflowExecution = {
+          ...execution,
+          status: 'failed',
+          error: error.message,
+          failedActivityName: task.activityName,
+          updatedAt: now,
+          completedAt: now,
+        };
+        await this.storage.saveExecution(failedExecution);
+
+        // Release uniqueness constraint
+        if (execution.uniqueKey) {
+          await this.storage.deleteUniqueKey(execution.workflowName, execution.uniqueKey);
+        }
+
+        // Invoke workflow failure callback
+        if (workflow?.onFailed) {
+          try {
+            await workflow.onFailed(execution.runId, execution.state, error);
+          } catch (err) {
+            this.logger.error('onFailed callback error', { runId: execution.runId, error: String(err) });
+          }
+        }
+
+        this.emitEvent({
+          type: 'execution:failed',
+          timestamp: now,
+          runId: execution.runId,
+          workflowName: execution.workflowName,
+          error: error.message,
+        });
+      }
+    });
 
     this.logger.error('Activity permanently failed', {
       taskId: task.taskId,

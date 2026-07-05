@@ -129,11 +129,27 @@ export class SQLiteStorage implements Storage {
     const existing = await this.getExecution(execution.runId);
     const isNew = !existing;
 
+    // UPSERT, not INSERT OR REPLACE: REPLACE deletes the existing row,
+    // which cascades away every activity task for the run when
+    // foreign_keys is on (better-sqlite3 enables it by default).
     await this.driver.execute(
-      `INSERT OR REPLACE INTO executions (
+      `INSERT INTO executions (
         run_id, workflow_name, unique_key, current_activity_index, current_activity_name,
         status, input, state, created_at, updated_at, completed_at, error, failed_activity_name
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(run_id) DO UPDATE SET
+        workflow_name = excluded.workflow_name,
+        unique_key = excluded.unique_key,
+        current_activity_index = excluded.current_activity_index,
+        current_activity_name = excluded.current_activity_name,
+        status = excluded.status,
+        input = excluded.input,
+        state = excluded.state,
+        created_at = excluded.created_at,
+        updated_at = excluded.updated_at,
+        completed_at = excluded.completed_at,
+        error = excluded.error,
+        failed_activity_name = excluded.failed_activity_name`,
       [
         execution.runId,
         execution.workflowName,
@@ -324,6 +340,14 @@ export class SQLiteStorage implements Storage {
         id: task.taskId,
       });
     }
+  }
+
+  // ============================================================================
+  // Atomicity
+  // ============================================================================
+
+  async transaction<T>(fn: () => Promise<T>): Promise<T> {
+    return await this.driver.transaction(fn);
   }
 
   // ============================================================================

@@ -441,6 +441,14 @@ export interface Storage {
   acknowledgeDeadLetter(id: string): Promise<void>;
   deleteDeadLetter(id: string): Promise<void>;
 
+  // Atomicity
+  /**
+   * Run multiple storage operations atomically: either every write inside
+   * fn commits, or none do. Implementations must support nested calls by
+   * joining the outer transaction.
+   */
+  transaction<T>(fn: () => Promise<T>): Promise<T>;
+
   // Maintenance
   purgeExecutions(options: { olderThanMs: number; statuses: WorkflowExecutionStatus[]; now: number }): Promise<number>;
   purgeDeadLetters(options: { olderThanMs: number; acknowledgedOnly?: boolean; now: number }): Promise<number>;
