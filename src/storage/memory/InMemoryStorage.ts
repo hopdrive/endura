@@ -2,6 +2,10 @@
  * In-memory storage adapter for testing and development.
  */
 
+/* eslint-disable @typescript-eslint/require-await --
+ * Fully synchronous implementation of the async Storage interface; the
+ * async keyword satisfies the contract without awaiting anything. */
+
 import {
   Storage,
   StorageChange,

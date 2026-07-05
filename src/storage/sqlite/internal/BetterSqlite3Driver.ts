@@ -3,6 +3,10 @@
  * This is only used for testing - the actual Expo app uses expo-sqlite.
  */
 
+/* eslint-disable @typescript-eslint/require-await --
+ * better-sqlite3 is fully synchronous; the async keyword satisfies the
+ * SQLiteDriver contract without awaiting anything. */
+
 import { SQLiteDriver, SQLiteRow, SQLiteResult } from './SQLiteDriver';
 
 // Type definitions for better-sqlite3 (to avoid requiring the dependency at compile time)
@@ -33,8 +37,8 @@ export class BetterSqlite3Driver implements SQLiteDriver {
    * Create a new driver instance with a database file or in-memory database.
    */
   static async create(databasePath: string = ':memory:'): Promise<BetterSqlite3Driver> {
-    // Dynamic import to avoid requiring better-sqlite3 at compile time
-    const Database = require('better-sqlite3');
+    // Dynamic require to avoid needing better-sqlite3 at compile time
+    const Database = require('better-sqlite3') as new (path: string) => BetterSqlite3Database;
     const db = new Database(databasePath);
     return new BetterSqlite3Driver(db);
   }

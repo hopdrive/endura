@@ -136,9 +136,9 @@ export async function runBackgroundWorkflowTask(
       environment: options.environment,
     });
 
-    // Register all workflows
+    // Register all workflows (the engine erases input generics internally)
     for (const workflow of options.workflows) {
-      client.registerWorkflow(workflow);
+      client.registerWorkflow(workflow as Workflow);
     }
 
     // Process for the allowed time

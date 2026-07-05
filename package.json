@@ -50,7 +50,7 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint src tests --ext .ts,.tsx",
+    "lint": "eslint src tests --ext .ts,.tsx --max-warnings 0",
     "clean": "rm -rf dist",
     "prepare": "husky"
   },

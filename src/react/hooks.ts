@@ -29,6 +29,8 @@ import {
   WorkflowExecutionStatus,
   DeadLetterRecord,
   Storage,
+  Workflow,
+  StartWorkflowOptions,
 } from '../core/types';
 import { WorkflowEngine } from '../core/engine';
 
@@ -249,8 +251,10 @@ export function useWorkflowStarter<TInput>(engine: WorkflowEngine) {
       setError(null);
 
       try {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const exec = await engine.start(workflow as any, options as any);
+        const exec = await engine.start(
+          workflow as unknown as Workflow<Record<string, unknown>>,
+          options as unknown as StartWorkflowOptions<Record<string, unknown>>
+        );
         setExecution(exec);
         return exec;
       } catch (err) {
