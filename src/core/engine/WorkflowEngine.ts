@@ -30,10 +30,14 @@ import { conditions } from '../conditions';
 
 // Default activity options
 const DEFAULT_TIMEOUT = 25000;
-const DEFAULT_MAX_ATTEMPTS = 1;
+// Max FAILURES before dead-lettering. A durable-execution engine must not
+// default to at-most-once (the old default of 1 meant a single flaky
+// network error permanently failed the workflow).
+const DEFAULT_MAX_ATTEMPTS = 3;
 const DEFAULT_INITIAL_INTERVAL = 1000;
 const DEFAULT_BACKOFF_COEFFICIENT = 2;
 const DEFAULT_PRIORITY = 0;
+const DEFAULT_LEASE_MS = 60000;
 
 /**
  * The WorkflowEngine orchestrates workflow execution.
@@ -51,6 +55,13 @@ export class WorkflowEngine {
   private activities: Map<string, Activity> = new Map();
   private isRunning = false;
   private abortController: AbortController | null = null;
+  private hasReconciled = false;
+  private nextLeaseRecoveryAt = 0;
+
+  // Identifies this engine instance for task leases; every engine (e.g.
+  // foreground app vs background wake) gets its own.
+  private ownerId: string = generateId();
+  private leaseDurationMs: number;
 
   // Track active AbortControllers by runId for cancellation propagation
   private activeAbortControllers: Map<string, { abort: (reason?: unknown) => void }> = new Map();
@@ -63,6 +74,7 @@ export class WorkflowEngine {
     this.logger = config.logger ?? silentLogger;
     this.onEvent = config.onEvent;
     this.cleanup = config.cleanup;
+    this.leaseDurationMs = config.leaseDurationMs ?? DEFAULT_LEASE_MS;
   }
 
   /**
@@ -88,18 +100,27 @@ export class WorkflowEngine {
   }
 
   /**
-   * Recover tasks that were active when the engine crashed.
+   * Recover tasks whose owner crashed. Only tasks with a lapsed (or
+   * missing) lease are reclaimed — an unexpired lease means another
+   * engine is live and mid-task (e.g. the foreground engine while we are
+   * a background wake), and resetting its task would run it twice.
    */
   private async recoverActiveTasks(): Promise<void> {
     const activeTasks = await this.storage.getActivityTasksByStatus('active');
     const now = this.clock.now();
 
     for (const task of activeTasks) {
+      if (task.leaseExpiresAt != null && task.leaseExpiresAt > now) {
+        continue;
+      }
+
       this.logger.info('Recovering crashed task', { taskId: task.taskId, activityName: task.activityName });
 
-      // Check if max attempts exceeded
-      if (task.attempts >= task.maxAttempts) {
-        // Move to failed state
+      // A crash (app kill, OS suspend) is not a failure — only recorded
+      // failures count toward exhaustion, so recovery never burns an
+      // attempt. Killing the app mid-task is routine on mobile.
+      if ((task.failures ?? 0) >= task.maxAttempts) {
+        // Already out of failure budget before the crash — finish the job.
         await this.handleTaskPermanentFailure(task, new Error('Crashed during execution'));
       } else {
         // Reset to pending for retry
@@ -108,9 +129,85 @@ export class WorkflowEngine {
           status: 'pending',
           scheduledFor: now, // Run immediately
           error: 'Recovered from crash',
+          ownerId: undefined,
+          leaseExpiresAt: undefined,
         };
         await this.storage.saveActivityTask(updatedTask);
       }
+    }
+  }
+
+  /**
+   * Repair 'running' executions that have no pending or active task.
+   * A crash between the completed-task write and the advance (or between
+   * the execution insert and the first task insert) leaves a workflow
+   * 'running' with nothing scheduled — without this pass it would hang
+   * forever, since crash recovery only scans 'active' tasks.
+   */
+  private async reconcileStrandedExecutions(): Promise<void> {
+    const now = this.clock.now();
+    const running = await this.storage.getExecutionsByStatus('running');
+
+    for (const execution of running) {
+      const tasks = await this.storage.getActivityTasksForExecution(execution.runId);
+      const hasFrontierTask = tasks.some(t => t.status === 'pending' || t.status === 'active');
+      if (hasFrontierTask) continue;
+
+      const workflow = this.workflows.get(execution.workflowName);
+      if (!workflow) {
+        this.logger.warn('Stranded execution references unregistered workflow', {
+          runId: execution.runId,
+          workflowName: execution.workflowName,
+        });
+        continue;
+      }
+
+      const currentTask = tasks.find(t => t.activityName === execution.currentActivityName);
+
+      if (currentTask?.status === 'completed') {
+        // The activity finished but the advance was lost — replay it.
+        this.logger.info('Reconciling stranded execution: replaying advance', {
+          runId: execution.runId,
+          activityName: currentTask.activityName,
+        });
+        await this.storage.transaction(async () => {
+          await this.advanceWorkflow(currentTask, currentTask.result);
+        });
+        continue;
+      }
+
+      if (currentTask?.status === 'failed') {
+        // The task failed but the execution was never marked failed.
+        this.logger.info('Reconciling stranded execution: marking failed', {
+          runId: execution.runId,
+          activityName: currentTask.activityName,
+        });
+        await this.storage.saveExecution({
+          ...execution,
+          status: 'failed',
+          error: currentTask.error ?? 'Activity failed',
+          failedActivityName: currentTask.activityName,
+          updatedAt: now,
+          completedAt: now,
+        });
+        continue;
+      }
+
+      // No record of the frontier activity at all — schedule it.
+      const activity = workflow.activities[execution.currentActivityIndex];
+      if (!activity || activity.name !== execution.currentActivityName) {
+        this.logger.warn('Cannot reconcile stranded execution: activity mismatch', {
+          runId: execution.runId,
+          expected: execution.currentActivityName,
+          found: activity?.name,
+        });
+        continue;
+      }
+      this.logger.info('Reconciling stranded execution: scheduling frontier task', {
+        runId: execution.runId,
+        activityName: activity.name,
+      });
+      await this.scheduleActivityTask(execution, activity, execution.state);
     }
   }
 
@@ -171,23 +268,6 @@ export class WorkflowEngine {
     const now = this.clock.now();
     const runId = generateId();
 
-    // Handle uniqueness constraint
-    if (options.uniqueKey) {
-      const canUse = await this.storage.setUniqueKey(workflow.name, options.uniqueKey, runId);
-      if (!canUse) {
-        const existingRunId = await this.storage.getUniqueKey(workflow.name, options.uniqueKey);
-        if (existingRunId) {
-          if (options.onConflict === 'ignore') {
-            const existing = await this.storage.getExecution(existingRunId);
-            if (existing) {
-              return existing;
-            }
-          }
-          throw new UniqueConstraintError(workflow.name, options.uniqueKey, existingRunId);
-        }
-      }
-    }
-
     const firstActivity = workflow.activities[0];
     if (!firstActivity) {
       throw new Error(`Workflow '${workflow.name}' has no activities`);
@@ -207,10 +287,51 @@ export class WorkflowEngine {
       updatedAt: now,
     };
 
-    await this.storage.saveExecution(execution);
+    // The uniqueness check, the execution row, and its first task must
+    // land together: a crash between writes strands the workflow, and a
+    // check outside the transaction races other starters. The partial
+    // unique index (one 'running' execution per key) is the final
+    // arbiter for races the read cannot see.
+    let existingExecution: WorkflowExecution | null = null;
+    try {
+      await this.storage.transaction(async () => {
+        if (options.uniqueKey) {
+          const canUse = await this.storage.setUniqueKey(workflow.name, options.uniqueKey, runId);
+          if (!canUse) {
+            const existingRunId = await this.storage.getUniqueKey(workflow.name, options.uniqueKey);
+            if (existingRunId) {
+              if (options.onConflict === 'ignore') {
+                existingExecution = await this.storage.getExecution(existingRunId);
+                if (existingExecution) {
+                  return;
+                }
+              }
+              throw new UniqueConstraintError(workflow.name, options.uniqueKey, existingRunId);
+            }
+          }
+        }
 
-    // Create first activity task
-    await this.scheduleActivityTask(execution, firstActivity, execution.state);
+        await this.storage.saveExecution(execution);
+        await this.scheduleActivityTask(execution, firstActivity, execution.state);
+      });
+    } catch (err) {
+      // Translate a database-level unique violation (a racer that the
+      // pre-check couldn't see) into the same error as the checked path.
+      if (
+        options.uniqueKey &&
+        err instanceof Error &&
+        /unique constraint/i.test(err.message) &&
+        !(err instanceof UniqueConstraintError)
+      ) {
+        const existingRunId = await this.storage.getUniqueKey(workflow.name, options.uniqueKey);
+        throw new UniqueConstraintError(workflow.name, options.uniqueKey, existingRunId ?? 'unknown');
+      }
+      throw err;
+    }
+
+    if (existingExecution) {
+      return existingExecution;
+    }
 
     this.emitEvent({
       type: 'execution:started',
@@ -296,22 +417,21 @@ export class WorkflowEngine {
     const now = this.clock.now();
     const workflow = this.workflows.get(execution.workflowName);
 
-    // 2. Update execution status
+    // 2-4. Update execution status, delete pending tasks, and release the
+    // uniqueness constraint atomically.
     const updatedExecution: WorkflowExecution = {
       ...execution,
       status: 'cancelled',
       updatedAt: now,
       completedAt: now,
     };
-    await this.storage.saveExecution(updatedExecution);
-
-    // 3. Delete pending tasks for this execution
-    await this.storage.deleteActivityTasksForExecution(runId);
-
-    // 4. Release uniqueness constraint
-    if (execution.uniqueKey) {
-      await this.storage.deleteUniqueKey(execution.workflowName, execution.uniqueKey);
-    }
+    await this.storage.transaction(async () => {
+      await this.storage.saveExecution(updatedExecution);
+      await this.storage.deleteActivityTasksForExecution(runId);
+      if (execution.uniqueKey) {
+        await this.storage.deleteUniqueKey(execution.workflowName, execution.uniqueKey);
+      }
+    });
 
     // 5. Invoke callback
     if (workflow?.onCancelled) {
@@ -360,7 +480,17 @@ export class WorkflowEngine {
           break;
         }
 
-        const processed = await this.tick();
+        let processed = 0;
+        try {
+          processed = await this.tick();
+        } catch (err) {
+          // tick() contains task-level errors itself; this is the
+          // backstop for anything unexpected. Back off so a persistent
+          // storage failure doesn't spin a hot error loop.
+          this.logger.error('Tick failed', { error: String(err) });
+          await this.scheduler.sleep(1000);
+          continue;
+        }
 
         // If no work was done, sleep briefly
         if (processed === 0) {
@@ -390,8 +520,39 @@ export class WorkflowEngine {
    * Process one batch of pending tasks. Returns number of tasks processed.
    */
   async tick(): Promise<number> {
+    // Runs once per engine instance, on the first tick, so workflows have
+    // been registered by the time stranded executions are repaired.
+    if (!this.hasReconciled) {
+      this.hasReconciled = true;
+      try {
+        await this.reconcileStrandedExecutions();
+      } catch (err) {
+        this.logger.error('Reconciliation failed', { error: String(err) });
+      }
+    }
+
     const now = this.clock.now();
-    const pendingTasks = await this.storage.getPendingActivityTasks({ limit: 10, now });
+
+    // Recovery cannot run only at create(): an engine booted inside
+    // another engine's lease window correctly skips the leased task then,
+    // but must still reclaim it once the lease lapses. Re-scan on a
+    // half-lease cadence.
+    if (now >= this.nextLeaseRecoveryAt) {
+      this.nextLeaseRecoveryAt = now + Math.max(1000, Math.floor(this.leaseDurationMs / 2));
+      try {
+        await this.recoverActiveTasks();
+      } catch (err) {
+        this.logger.error('Lease recovery failed', { error: String(err) });
+      }
+    }
+
+    let pendingTasks: ActivityTask[];
+    try {
+      pendingTasks = await this.storage.getPendingActivityTasks({ limit: 10, now });
+    } catch (err) {
+      this.logger.error('Failed to fetch pending tasks', { error: String(err) });
+      return 0;
+    }
 
     let processed = 0;
     for (const task of pendingTasks) {
@@ -400,9 +561,16 @@ export class WorkflowEngine {
         break;
       }
 
-      const success = await this.processTask(task);
-      if (success) {
-        processed++;
+      try {
+        const success = await this.processTask(task);
+        if (success) {
+          processed++;
+        }
+      } catch (err) {
+        // One task's storage failure (SQLITE_BUSY, poison row) must not
+        // kill the loop — the task stays claimable/leased and is retried
+        // or recovered on a later tick.
+        this.logger.error('Task processing failed', { taskId: task.taskId, error: String(err) });
       }
     }
 
@@ -416,7 +584,10 @@ export class WorkflowEngine {
     const now = this.clock.now();
 
     // Try to claim the task
-    const claimed = await this.storage.claimActivityTask(task.taskId, now);
+    const claimed = await this.storage.claimActivityTask(task.taskId, now, {
+      ownerId: this.ownerId,
+      leaseDurationMs: this.leaseDurationMs,
+    });
     if (!claimed) {
       return false; // Already claimed or no longer pending
     }
@@ -480,6 +651,26 @@ export class WorkflowEngine {
       }, task.timeout);
     }
 
+    // Heartbeat: renew the lease at half its duration for as long as the
+    // activity runs, so long tasks aren't reclaimed by another engine.
+    let heartbeatStopped = false;
+    let heartbeatHandle: unknown = null;
+    const scheduleHeartbeat = (): void => {
+      heartbeatHandle = this.scheduler.setTimeout(() => {
+        void this.storage
+          .renewLease(task.taskId, this.ownerId, this.clock.now() + this.leaseDurationMs)
+          .then(renewed => {
+            if (renewed && !heartbeatStopped) {
+              scheduleHeartbeat();
+            }
+          })
+          .catch(err => {
+            this.logger.warn('Lease renewal failed', { taskId: task.taskId, error: String(err) });
+          });
+      }, Math.floor(this.leaseDurationMs / 2));
+    };
+    scheduleHeartbeat();
+
     // Create activity context
     const runtimeContext = this.environment.getRuntimeContext();
     const context: ActivityContext = {
@@ -495,8 +686,39 @@ export class WorkflowEngine {
     };
 
     try {
-      // Execute the activity
-      const result = await activity.execute(context);
+      // Race the activity against the abort signal. Awaiting the handler
+      // directly would let one hung handler (that ignores ctx.signal)
+      // wedge the serial engine forever. Once the abort wins, any late
+      // settlement of the handler is dropped — the failure already
+      // recorded must not be overwritten (stale-success guard).
+      const executePromise = Promise.resolve(activity.execute(context));
+      executePromise.catch(() => {
+        // Late rejection from a timed-out/abandoned handler: already
+        // handled (or superseded) via the race — never let it surface
+        // as an unhandled rejection.
+      });
+
+      let result: unknown;
+      if (task.timeout > 0) {
+        const abortPromise = new Promise<never>((_, reject) => {
+          const fail = () => {
+            const reason: unknown = signal.reason;
+            reject(
+              reason instanceof Error
+                ? reason
+                : new Error(typeof reason === 'string' ? reason : 'Activity aborted')
+            );
+          };
+          if (signal.aborted) {
+            fail();
+          } else {
+            signal.addEventListener('abort', fail, { once: true });
+          }
+        });
+        result = await Promise.race([executePromise, abortPromise]);
+      } else {
+        result = await executePromise;
+      }
 
       // Clear timeout
       if (timeoutHandle) {
@@ -516,6 +738,10 @@ export class WorkflowEngine {
       // Handle failure
       await this.handleTaskFailure(task, activity, error);
     } finally {
+      heartbeatStopped = true;
+      if (heartbeatHandle) {
+        this.scheduler.clearTimeout(heartbeatHandle);
+      }
       // Always clean up the controller reference
       this.activeAbortControllers.delete(task.runId);
     }
@@ -539,29 +765,35 @@ export class WorkflowEngine {
       completedAt: now,
       lastAttemptAt: now,
     };
-    await this.storage.saveActivityTask(completedTask);
 
-    // Call onSuccess callback
-    if (activity.options?.onSuccess) {
-      try {
-        await activity.options.onSuccess(task.taskId, task.input, result ?? {});
-      } catch (err) {
-        this.logger.error('onSuccess callback error', { taskId: task.taskId, error: String(err) });
+    // The completed-task write and the advance (execution update + next
+    // task) must commit atomically — a crash between them strands the
+    // workflow 'running' with no frontier task.
+    await this.storage.transaction(async () => {
+      await this.storage.saveActivityTask(completedTask);
+
+      // Call onSuccess callback
+      if (activity.options?.onSuccess) {
+        try {
+          await activity.options.onSuccess(task.taskId, task.input, result ?? {});
+        } catch (err) {
+          this.logger.error('onSuccess callback error', { taskId: task.taskId, error: String(err) });
+        }
       }
-    }
 
-    this.emitEvent({
-      type: 'activity:completed',
-      timestamp: now,
-      runId: task.runId,
-      taskId: task.taskId,
-      activityName: task.activityName,
+      this.emitEvent({
+        type: 'activity:completed',
+        timestamp: now,
+        runId: task.runId,
+        taskId: task.taskId,
+        activityName: task.activityName,
+      });
+
+      this.logger.debug('Activity completed', { taskId: task.taskId, activityName: task.activityName });
+
+      // Advance the workflow
+      await this.advanceWorkflow(task, result);
     });
-
-    this.logger.debug('Activity completed', { taskId: task.taskId, activityName: task.activityName });
-
-    // Advance the workflow
-    await this.advanceWorkflow(task, result);
   }
 
   /**
@@ -666,12 +898,15 @@ export class WorkflowEngine {
       }
     }
 
-    // Check if we should retry
-    if (task.attempts < task.maxAttempts) {
+    // Only real failures count toward exhaustion — attempts is the claim
+    // count and includes claims lost to crashes.
+    const failures = (task.failures ?? 0) + 1;
+
+    if (failures < task.maxAttempts) {
       // Schedule retry with backoff
       const retryOpts = activity.options?.retry ?? {};
       const delay = calculateBackoffDelay(
-        task.attempts,
+        failures,
         retryOpts.initialInterval ?? DEFAULT_INITIAL_INTERVAL,
         retryOpts.backoffCoefficient ?? DEFAULT_BACKOFF_COEFFICIENT,
         retryOpts.maximumInterval
@@ -680,22 +915,25 @@ export class WorkflowEngine {
       const retriedTask: ActivityTask = {
         ...task,
         status: 'pending',
+        failures,
         scheduledFor: now + delay,
         lastAttemptAt: now,
         error: error.message,
         errorStack: error.stack,
+        ownerId: undefined,
+        leaseExpiresAt: undefined,
       };
       await this.storage.saveActivityTask(retriedTask);
 
       this.logger.debug('Scheduled retry', {
         taskId: task.taskId,
-        attempt: task.attempts,
+        failures,
         maxAttempts: task.maxAttempts,
         delay,
       });
     } else {
       // Permanent failure
-      await this.handleTaskPermanentFailure(task, error);
+      await this.handleTaskPermanentFailure({ ...task, failures }, error);
     }
   }
 
@@ -717,84 +955,90 @@ export class WorkflowEngine {
       error: error.message,
       errorStack: error.stack,
     };
-    await this.storage.saveActivityTask(failedTask);
 
-    // Call onFailed callback
-    if (activity?.options?.onFailed) {
-      try {
-        await activity.options.onFailed(task.taskId, task.input, error);
-      } catch (err) {
-        this.logger.error('onFailed callback error', { taskId: task.taskId, error: String(err) });
-      }
-    }
+    // Failed task, dead letter, and failed execution must commit
+    // atomically — a partial write leaves the workflow 'running' with a
+    // dead frontier task, or a DLQ entry with a live execution.
+    await this.storage.transaction(async () => {
+      await this.storage.saveActivityTask(failedTask);
 
-    // Move to dead letter queue
-    const deadLetter: DeadLetterRecord = {
-      id: generateId(),
-      runId: task.runId,
-      taskId: task.taskId,
-      activityName: task.activityName,
-      workflowName: execution?.workflowName ?? 'unknown',
-      input: task.input,
-      error: error.message,
-      errorStack: error.stack,
-      attempts: task.attempts,
-      failedAt: now,
-      acknowledged: false,
-    };
-    await this.storage.saveDeadLetter(deadLetter);
-
-    this.emitEvent({
-      type: 'activity:failed',
-      timestamp: now,
-      runId: task.runId,
-      taskId: task.taskId,
-      activityName: task.activityName,
-      error: error.message,
-    });
-
-    this.emitEvent({
-      type: 'deadletter:added',
-      timestamp: now,
-      runId: task.runId,
-      taskId: task.taskId,
-      activityName: task.activityName,
-    });
-
-    // Mark workflow as failed
-    if (execution) {
-      const failedExecution: WorkflowExecution = {
-        ...execution,
-        status: 'failed',
-        error: error.message,
-        failedActivityName: task.activityName,
-        updatedAt: now,
-        completedAt: now,
-      };
-      await this.storage.saveExecution(failedExecution);
-
-      // Release uniqueness constraint
-      if (execution.uniqueKey) {
-        await this.storage.deleteUniqueKey(execution.workflowName, execution.uniqueKey);
-      }
-
-      // Invoke workflow failure callback
-      if (workflow?.onFailed) {
+      // Call onFailed callback
+      if (activity?.options?.onFailed) {
         try {
-          await workflow.onFailed(execution.runId, execution.state, error);
+          await activity.options.onFailed(task.taskId, task.input, error);
         } catch (err) {
-          this.logger.error('onFailed callback error', { runId: execution.runId, error: String(err) });
+          this.logger.error('onFailed callback error', { taskId: task.taskId, error: String(err) });
         }
       }
 
+      // Move to dead letter queue
+      const deadLetter: DeadLetterRecord = {
+        id: generateId(),
+        runId: task.runId,
+        taskId: task.taskId,
+        activityName: task.activityName,
+        workflowName: execution?.workflowName ?? 'unknown',
+        input: task.input,
+        error: error.message,
+        errorStack: error.stack,
+        attempts: task.attempts,
+        failedAt: now,
+        acknowledged: false,
+      };
+      await this.storage.saveDeadLetter(deadLetter);
+
       this.emitEvent({
-        type: 'execution:failed',
+        type: 'activity:failed',
         timestamp: now,
-        runId: execution.runId,
-        workflowName: execution.workflowName,
+        runId: task.runId,
+        taskId: task.taskId,
+        activityName: task.activityName,
         error: error.message,
       });
-    }
+
+      this.emitEvent({
+        type: 'deadletter:added',
+        timestamp: now,
+        runId: task.runId,
+        taskId: task.taskId,
+        activityName: task.activityName,
+      });
+
+      // Mark workflow as failed
+      if (execution) {
+        const failedExecution: WorkflowExecution = {
+          ...execution,
+          status: 'failed',
+          error: error.message,
+          failedActivityName: task.activityName,
+          updatedAt: now,
+          completedAt: now,
+        };
+        await this.storage.saveExecution(failedExecution);
+
+        // Release uniqueness constraint
+        if (execution.uniqueKey) {
+          await this.storage.deleteUniqueKey(execution.workflowName, execution.uniqueKey);
+        }
+
+        // Invoke workflow failure callback
+        if (workflow?.onFailed) {
+          try {
+            await workflow.onFailed(execution.runId, execution.state, error);
+          } catch (err) {
+            this.logger.error('onFailed callback error', { runId: execution.runId, error: String(err) });
+          }
+        }
+
+        this.emitEvent({
+          type: 'execution:failed',
+          timestamp: now,
+          runId: execution.runId,
+          workflowName: execution.workflowName,
+          error: error.message,
+        });
+      }
+    });
 
     this.logger.error('Activity permanently failed', {
       taskId: task.taskId,
@@ -817,6 +1061,8 @@ export class WorkflowEngine {
       status: 'pending',
       scheduledFor: now + delay,
       lastAttemptAt: now,
+      ownerId: undefined,
+      leaseExpiresAt: undefined,
     };
     // Decrement attempts since this wasn't a real failure
     skippedTask.attempts = Math.max(0, skippedTask.attempts - 1);

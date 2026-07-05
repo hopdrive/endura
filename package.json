@@ -6,36 +6,36 @@
   "types": "dist/index.d.ts",
   "exports": {
     ".": {
-      "import": "./dist/index.js",
-      "types": "./dist/index.d.ts"
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
     },
     "./core": {
-      "import": "./dist/core/index.js",
-      "types": "./dist/core/index.d.ts"
+      "types": "./dist/core/index.d.ts",
+      "default": "./dist/core/index.js"
     },
     "./storage": {
-      "import": "./dist/storage/index.js",
-      "types": "./dist/storage/index.d.ts"
+      "types": "./dist/storage/index.d.ts",
+      "default": "./dist/storage/index.js"
     },
     "./storage/sqlite": {
-      "import": "./dist/storage/sqlite/index.js",
-      "types": "./dist/storage/sqlite/index.d.ts"
+      "types": "./dist/storage/sqlite/index.d.ts",
+      "default": "./dist/storage/sqlite/index.js"
     },
     "./storage/memory": {
-      "import": "./dist/storage/memory/index.js",
-      "types": "./dist/storage/memory/index.d.ts"
+      "types": "./dist/storage/memory/index.d.ts",
+      "default": "./dist/storage/memory/index.js"
     },
     "./react": {
-      "import": "./dist/react/index.js",
-      "types": "./dist/react/index.d.ts"
+      "types": "./dist/react/index.d.ts",
+      "default": "./dist/react/index.js"
     },
     "./environmental/expo": {
-      "import": "./dist/environmental/expo/index.js",
-      "types": "./dist/environmental/expo/index.d.ts"
+      "types": "./dist/environmental/expo/index.d.ts",
+      "default": "./dist/environmental/expo/index.js"
     },
     "./testing": {
-      "import": "./dist/testing/index.js",
-      "types": "./dist/testing/index.d.ts"
+      "types": "./dist/testing/index.d.ts",
+      "default": "./dist/testing/index.js"
     }
   },
   "files": [
@@ -74,7 +74,6 @@
     "@types/better-sqlite3": "^7.6.8",
     "@types/node": "^20.11.0",
     "@types/react": "^18.2.0",
-    "@types/uuid": "^9.0.8",
     "@typescript-eslint/eslint-plugin": "^8.51.0",
     "@typescript-eslint/parser": "^8.51.0",
     "@vitest/coverage-v8": "^4.0.16",
@@ -87,18 +86,19 @@
     "typescript-eslint": "^8.51.0",
     "vitest": "^4.0.16"
   },
-  "dependencies": {
-    "uuid": "^9.0.1"
-  },
   "peerDependencies": {
     "expo-sqlite": ">=13.0.0",
-    "react": ">=18.0.0"
+    "react": ">=18.0.0",
+    "expo-crypto": ">=12.0.0"
   },
   "peerDependenciesMeta": {
     "expo-sqlite": {
       "optional": true
     },
     "react": {
+      "optional": true
+    },
+    "expo-crypto": {
       "optional": true
     }
   },

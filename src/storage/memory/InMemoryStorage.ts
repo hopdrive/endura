@@ -18,6 +18,7 @@ export class InMemoryStorage implements Storage {
   private tasks = new Map<string, ActivityTask>();
   private deadLetters = new Map<string, DeadLetterRecord>();
   private subscribers: Set<(change: StorageChange) => void> = new Set();
+  private transactionDepth = 0;
 
   private makeUniqueKeyId(workflowName: string, key: string): string {
     return `${workflowName}:${key}`;
@@ -165,6 +166,39 @@ export class InMemoryStorage implements Storage {
   }
 
   // ============================================================================
+  // Atomicity
+  // ============================================================================
+
+  async transaction<T>(fn: () => Promise<T>): Promise<T> {
+    // Nested calls join the outer transaction.
+    if (this.transactionDepth > 0) {
+      return await fn();
+    }
+
+    // Records are replaced, never mutated in place, so shallow map
+    // snapshots are enough to restore pre-transaction state.
+    const snapshot = {
+      executions: new Map(this.executions),
+      uniqueKeys: new Map(this.uniqueKeys),
+      tasks: new Map(this.tasks),
+      deadLetters: new Map(this.deadLetters),
+    };
+
+    this.transactionDepth++;
+    try {
+      return await fn();
+    } catch (error) {
+      this.executions = snapshot.executions;
+      this.uniqueKeys = snapshot.uniqueKeys;
+      this.tasks = snapshot.tasks;
+      this.deadLetters = snapshot.deadLetters;
+      throw error;
+    } finally {
+      this.transactionDepth--;
+    }
+  }
+
+  // ============================================================================
   // Queue Operations
   // ============================================================================
 
@@ -191,7 +225,11 @@ export class InMemoryStorage implements Storage {
     return pending.slice(0, limit);
   }
 
-  async claimActivityTask(taskId: string, now: number): Promise<ActivityTask | null> {
+  async claimActivityTask(
+    taskId: string,
+    now: number,
+    lease?: { ownerId: string; leaseDurationMs: number }
+  ): Promise<ActivityTask | null> {
     const task = this.tasks.get(taskId);
     if (!task || task.status !== 'pending') return null;
 
@@ -203,6 +241,8 @@ export class InMemoryStorage implements Storage {
       status: 'active',
       startedAt: now,
       attempts: task.attempts + 1,
+      ownerId: lease?.ownerId,
+      leaseExpiresAt: lease ? now + lease.leaseDurationMs : undefined,
     };
     this.tasks.set(taskId, claimed);
     this.notifySubscribers({
@@ -212,6 +252,15 @@ export class InMemoryStorage implements Storage {
     });
 
     return { ...claimed };
+  }
+
+  async renewLease(taskId: string, ownerId: string, leaseExpiresAt: number): Promise<boolean> {
+    const task = this.tasks.get(taskId);
+    if (!task || task.status !== 'active' || task.ownerId !== ownerId) {
+      return false;
+    }
+    this.tasks.set(taskId, { ...task, leaseExpiresAt });
+    return true;
   }
 
   // ============================================================================

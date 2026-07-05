@@ -13,7 +13,7 @@ import {
   DeadLetterRecord,
 } from '../../core/types';
 import { SQLiteDriver, SQLiteRow } from './internal/SQLiteDriver';
-import { getSchemaStatements, SCHEMA_VERSION } from './internal/schema';
+import { getSchemaStatements, MIGRATIONS, SCHEMA_VERSION } from './internal/schema';
 
 /**
  * SQLite-based storage adapter.
@@ -28,27 +28,81 @@ export class SQLiteStorage implements Storage {
   }
 
   /**
-   * Initialize the database schema.
+   * Initialize the database schema, migrating older databases forward.
    * Must be called before using the storage.
+   *
+   * Versioning lives in PRAGMA user_version. A fresh database gets the
+   * full current schema; an existing one is migrated one version at a
+   * time, each migration + version bump in a single transaction, so a
+   * crash mid-migration leaves the database at the previous version.
    */
   async initialize(): Promise<void> {
     if (this.initialized) return;
 
-    const statements = getSchemaStatements();
-    for (const stmt of statements) {
-      await this.driver.execute(stmt);
+    // Connection pragmas, before any other statement:
+    // - WAL allows a reader/writer pair across the foreground and
+    //   background engine connections (no-op for in-memory databases).
+    // - busy_timeout makes a locked database wait instead of throwing
+    //   SQLITE_BUSY immediately.
+    // - foreign_keys is OFF by default in expo-sqlite, which would leave
+    //   the schema's ON DELETE CASCADE inert on-device.
+    await this.driver.query('PRAGMA journal_mode = WAL');
+    await this.driver.query('PRAGMA busy_timeout = 5000');
+    await this.driver.execute('PRAGMA foreign_keys = ON');
+
+    const storedVersion = await this.getUserVersion();
+    const hasSchema = await this.hasExistingSchema();
+
+    if (!hasSchema) {
+      await this.driver.transaction(async () => {
+        for (const stmt of getSchemaStatements()) {
+          await this.driver.execute(stmt);
+        }
+        await this.setUserVersion(SCHEMA_VERSION);
+      });
+      this.initialized = true;
+      return;
     }
 
-    // Store schema version (for future migrations)
-    await this.driver.execute(
-      `CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT);`
-    );
-    await this.driver.execute(
-      `INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('version', ?);`,
-      [String(SCHEMA_VERSION)]
-    );
+    // Databases created before versioning report user_version 0.
+    let currentVersion = storedVersion === 0 ? 1 : storedVersion;
+    if (currentVersion > SCHEMA_VERSION) {
+      throw new Error(
+        `Database schema version ${currentVersion} is newer than this package supports (${SCHEMA_VERSION}). ` +
+          'Refusing to open — upgrade the endura package.'
+      );
+    }
+
+    for (const migration of MIGRATIONS) {
+      if (migration.toVersion <= currentVersion) continue;
+      await this.driver.transaction(async () => {
+        for (const stmt of migration.statements) {
+          await this.driver.execute(stmt);
+        }
+        await this.setUserVersion(migration.toVersion);
+      });
+      currentVersion = migration.toVersion;
+    }
 
     this.initialized = true;
+  }
+
+  private async getUserVersion(): Promise<number> {
+    const rows = await this.driver.query('PRAGMA user_version');
+    return Number(rows[0]?.['user_version'] ?? 0);
+  }
+
+  private async setUserVersion(version: number): Promise<void> {
+    // PRAGMA does not support bound parameters; version is a trusted
+    // integer from our own migration table.
+    await this.driver.execute(`PRAGMA user_version = ${Math.floor(version)}`);
+  }
+
+  private async hasExistingSchema(): Promise<boolean> {
+    const rows = await this.driver.query(
+      `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'executions'`
+    );
+    return rows.length > 0;
   }
 
   private notifySubscribers(change: StorageChange): void {
@@ -91,6 +145,7 @@ export class SQLiteStorage implements Storage {
       status: row['status'] as ActivityTaskStatus,
       priority: row['priority'] as number,
       attempts: row['attempts'] as number,
+      failures: row['failures'] != null ? Number(row['failures']) : 0,
       maxAttempts: row['max_attempts'] as number,
       timeout: row['timeout'] as number,
       input: JSON.parse(row['input'] as string),
@@ -102,6 +157,8 @@ export class SQLiteStorage implements Storage {
       completedAt: row['completed_at'] != null ? Number(row['completed_at']) : undefined,
       error: row['error'] != null ? String(row['error'] as string) : undefined,
       errorStack: row['error_stack'] != null ? String(row['error_stack'] as string) : undefined,
+      ownerId: row['owner_id'] != null ? String(row['owner_id'] as string) : undefined,
+      leaseExpiresAt: row['lease_expires_at'] != null ? Number(row['lease_expires_at']) : undefined,
     };
   }
 
@@ -129,11 +186,27 @@ export class SQLiteStorage implements Storage {
     const existing = await this.getExecution(execution.runId);
     const isNew = !existing;
 
+    // UPSERT, not INSERT OR REPLACE: REPLACE deletes the existing row,
+    // which cascades away every activity task for the run when
+    // foreign_keys is on (better-sqlite3 enables it by default).
     await this.driver.execute(
-      `INSERT OR REPLACE INTO executions (
+      `INSERT INTO executions (
         run_id, workflow_name, unique_key, current_activity_index, current_activity_name,
         status, input, state, created_at, updated_at, completed_at, error, failed_activity_name
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(run_id) DO UPDATE SET
+        workflow_name = excluded.workflow_name,
+        unique_key = excluded.unique_key,
+        current_activity_index = excluded.current_activity_index,
+        current_activity_name = excluded.current_activity_name,
+        status = excluded.status,
+        input = excluded.input,
+        state = excluded.state,
+        created_at = excluded.created_at,
+        updated_at = excluded.updated_at,
+        completed_at = excluded.completed_at,
+        error = excluded.error,
+        failed_activity_name = excluded.failed_activity_name`,
       [
         execution.runId,
         execution.workflowName,
@@ -222,9 +295,9 @@ export class SQLiteStorage implements Storage {
   }
 
   async deleteUniqueKey(_workflowName: string, _key: string): Promise<void> {
-    // Uniqueness is managed by the execution's unique_key column
-    // When an execution completes/fails, it's no longer "running" so the constraint is released
-    // No explicit deletion needed
+    // Intentionally a no-op for SQLite: the unique index is scoped to
+    // status='running', so the constraint releases automatically when the
+    // execution leaves 'running'.
   }
 
   // ============================================================================
@@ -237,9 +310,10 @@ export class SQLiteStorage implements Storage {
 
     await this.driver.execute(
       `INSERT OR REPLACE INTO activity_tasks (
-        task_id, run_id, activity_name, status, priority, attempts, max_attempts, timeout,
-        input, result, created_at, scheduled_for, started_at, last_attempt_at, completed_at, error, error_stack
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        task_id, run_id, activity_name, status, priority, attempts, failures, max_attempts, timeout,
+        input, result, created_at, scheduled_for, started_at, last_attempt_at, completed_at, error, error_stack,
+        owner_id, lease_expires_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         task.taskId,
         task.runId,
@@ -247,6 +321,7 @@ export class SQLiteStorage implements Storage {
         task.status,
         task.priority,
         task.attempts,
+        task.failures ?? 0,
         task.maxAttempts,
         task.timeout,
         JSON.stringify(task.input),
@@ -258,6 +333,8 @@ export class SQLiteStorage implements Storage {
         task.completedAt ?? null,
         task.error ?? null,
         task.errorStack ?? null,
+        task.ownerId ?? null,
+        task.leaseExpiresAt ?? null,
       ]
     );
 
@@ -327,6 +404,14 @@ export class SQLiteStorage implements Storage {
   }
 
   // ============================================================================
+  // Atomicity
+  // ============================================================================
+
+  async transaction<T>(fn: () => Promise<T>): Promise<T> {
+    return await this.driver.transaction(fn);
+  }
+
+  // ============================================================================
   // Queue Operations
   // ============================================================================
 
@@ -346,36 +431,32 @@ export class SQLiteStorage implements Storage {
     return rows.map(row => this.rowToTask(row));
   }
 
-  async claimActivityTask(taskId: string, now: number): Promise<ActivityTask | null> {
-    // Use a transaction to ensure atomic claim
+  async claimActivityTask(
+    taskId: string,
+    now: number,
+    lease?: { ownerId: string; leaseDurationMs: number }
+  ): Promise<ActivityTask | null> {
     return await this.driver.transaction(async () => {
-      // Check if task is still claimable
-      const rows = await this.driver.query(
-        `SELECT * FROM activity_tasks
+      // Compare-and-set: the status guard in the WHERE clause makes the
+      // claim atomic — a competing engine's claim shows up as changes === 0.
+      const result = await this.driver.execute(
+        `UPDATE activity_tasks
+         SET status = 'active', started_at = ?, attempts = attempts + 1,
+             owner_id = ?, lease_expires_at = ?
          WHERE task_id = ? AND status = 'pending'
            AND (scheduled_for IS NULL OR scheduled_for <= ?)`,
-        [taskId, now]
+        [now, lease?.ownerId ?? null, lease ? now + lease.leaseDurationMs : null, taskId, now]
       );
 
-      if (rows.length === 0) return null;
+      if ((result.changes ?? 0) === 0) {
+        return null; // not claimable, or another engine won the race
+      }
 
-      const task = this.rowToTask(rows[0]!);
-
-      // Update to claimed
-      await this.driver.execute(
-        `UPDATE activity_tasks
-         SET status = 'active', started_at = ?, attempts = attempts + 1
-         WHERE task_id = ?`,
-        [now, taskId]
+      const rows = await this.driver.query(
+        `SELECT * FROM activity_tasks WHERE task_id = ?`,
+        [taskId]
       );
-
-      // Return the claimed task with updated values
-      const claimed: ActivityTask = {
-        ...task,
-        status: 'active',
-        startedAt: now,
-        attempts: task.attempts + 1,
-      };
+      const claimed = this.rowToTask(rows[0]!);
 
       this.notifySubscribers({
         type: 'task',
@@ -385,6 +466,16 @@ export class SQLiteStorage implements Storage {
 
       return claimed;
     });
+  }
+
+  async renewLease(taskId: string, ownerId: string, leaseExpiresAt: number): Promise<boolean> {
+    const result = await this.driver.execute(
+      `UPDATE activity_tasks
+       SET lease_expires_at = ?
+       WHERE task_id = ? AND owner_id = ? AND status = 'active'`,
+      [leaseExpiresAt, taskId, ownerId]
+    );
+    return (result.changes ?? 0) > 0;
   }
 
   // ============================================================================

@@ -446,7 +446,7 @@ describe('WorkflowEngine - Retries + Backoff', () => {
   });
 
   describe('edge cases', () => {
-    it('should handle no retry policy (default single attempt)', async () => {
+    it('should retry with the default policy (3 attempts) when none specified', async () => {
       const engine = await createEngine();
       let attemptCount = 0;
 
@@ -456,7 +456,7 @@ describe('WorkflowEngine - Retries + Backoff', () => {
           attemptCount++;
           throw new Error('Fails immediately');
         },
-        // No retry policy - defaults to 1 attempt
+        // No retry policy — defaults to 3 attempts (not at-most-once)
       });
 
       const workflow = defineWorkflow({
@@ -469,8 +469,10 @@ describe('WorkflowEngine - Retries + Backoff', () => {
 
       expect(attemptCount).toBe(1);
 
+      // First failure schedules a retry rather than dead-lettering.
       const tasks = await storage.getActivityTasksForExecution(execution.runId);
-      expect(tasks[0]?.status).toBe('failed');
+      expect(tasks[0]?.status).toBe('pending');
+      expect(tasks[0]?.failures).toBe(1);
     });
 
     it('should handle immediate success (no retries needed)', async () => {

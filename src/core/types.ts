@@ -73,9 +73,11 @@ export interface ActivityTask {
   /** Higher = processed first */
   priority: number;
 
-  /** Current attempt count */
+  /** Claim count: how many times an engine picked this task up (includes claims lost to crashes) */
   attempts: number;
-  /** Max before marking failed */
+  /** Recorded execution failures (exceptions/timeouts) — this, not attempts, drives retry exhaustion */
+  failures?: number;
+  /** Max failures before marking failed */
   maxAttempts: number;
   /** Ms before task times out (0 = no timeout) */
   timeout: number;
@@ -91,6 +93,10 @@ export interface ActivityTask {
   scheduledFor?: number;
   /** When current attempt began */
   startedAt?: number;
+  /** Engine instance currently holding the claim */
+  ownerId?: string;
+  /** Lease expiry (unix ms) — an active task with a future lease must not be reclaimed by other engines */
+  leaseExpiresAt?: number;
   /** When last attempt finished */
   lastAttemptAt?: number;
   /** When completed */
@@ -356,6 +362,13 @@ export interface WorkflowEngineConfig {
   onEvent?: (event: EngineEvent) => void;
   /** Cleanup configuration */
   cleanup?: CleanupConfig;
+  /**
+   * How long a claimed task's lease lasts before other engines may
+   * reclaim it. A heartbeat renews the lease at half this interval while
+   * the activity is still running.
+   * @default 60000
+   */
+  leaseDurationMs?: number;
 }
 
 // ============================================================================
@@ -432,7 +445,16 @@ export interface Storage {
 
   // Queue Operations
   getPendingActivityTasks(options?: { limit?: number; now?: number }): Promise<ActivityTask[]>;
-  claimActivityTask(taskId: string, now: number): Promise<ActivityTask | null>;
+  claimActivityTask(
+    taskId: string,
+    now: number,
+    lease?: { ownerId: string; leaseDurationMs: number }
+  ): Promise<ActivityTask | null>;
+  /**
+   * Extend the lease on an active task. Returns false if the task is no
+   * longer active or is owned by a different engine.
+   */
+  renewLease(taskId: string, ownerId: string, leaseExpiresAt: number): Promise<boolean>;
 
   // Dead Letter Queue
   saveDeadLetter(record: DeadLetterRecord): Promise<void>;
@@ -440,6 +462,14 @@ export interface Storage {
   getUnacknowledgedDeadLetters(): Promise<DeadLetterRecord[]>;
   acknowledgeDeadLetter(id: string): Promise<void>;
   deleteDeadLetter(id: string): Promise<void>;
+
+  // Atomicity
+  /**
+   * Run multiple storage operations atomically: either every write inside
+   * fn commits, or none do. Implementations must support nested calls by
+   * joining the outer transaction.
+   */
+  transaction<T>(fn: () => Promise<T>): Promise<T>;
 
   // Maintenance
   purgeExecutions(options: { olderThanMs: number; statuses: WorkflowExecutionStatus[]; now: number }): Promise<number>;

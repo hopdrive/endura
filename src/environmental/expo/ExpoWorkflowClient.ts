@@ -6,9 +6,28 @@
 
 import { WorkflowEngine } from '../../core/engine';
 import { Storage } from '../../core/types';
+import { setIdGenerator } from '../../core/utils';
 import { ExpoClock } from './ExpoClock';
 import { ExpoScheduler } from './ExpoScheduler';
 import { ExpoEnvironment, ExpoEnvironmentOptions } from './ExpoEnvironment';
+
+/**
+ * Wire ID generation to expo-crypto when available. Hermes ships neither
+ * crypto.randomUUID nor crypto.getRandomValues, so without this the
+ * engine cannot mint IDs on-device.
+ */
+function wireExpoCrypto(): void {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const cryptoModule = require('expo-crypto') as { randomUUID?: () => string };
+    if (typeof cryptoModule.randomUUID === 'function') {
+      setIdGenerator(() => cryptoModule.randomUUID!());
+    }
+  } catch {
+    // expo-crypto not installed — generateId falls back to global crypto
+    // and throws a descriptive error if none exists.
+  }
+}
 
 /**
  * Configuration options for the Expo workflow client.
@@ -43,6 +62,13 @@ export interface ExpoWorkflowClientOptions {
     taskId?: string;
     [key: string]: unknown;
   }) => void;
+
+  /**
+   * How long a claimed task's lease lasts before other engines may
+   * reclaim it. See WorkflowEngineConfig.leaseDurationMs.
+   * @default 60000
+   */
+  leaseDurationMs?: number;
 }
 
 /**
@@ -98,6 +124,8 @@ export class ExpoWorkflowClient {
    * ```
    */
   static async create(options: ExpoWorkflowClientOptions): Promise<ExpoWorkflowClient> {
+    wireExpoCrypto();
+
     const storage = options.storage;
 
     // Create runtime adapters
@@ -112,6 +140,7 @@ export class ExpoWorkflowClient {
       scheduler,
       environment,
       onEvent: options.onEvent,
+      leaseDurationMs: options.leaseDurationMs,
     });
 
     return new ExpoWorkflowClient(engine, storage, environment);

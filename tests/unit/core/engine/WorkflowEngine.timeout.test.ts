@@ -46,6 +46,7 @@ describe('WorkflowEngine - Activity Timeout Handling', () => {
       const activity = defineActivity({
         name: 'slowActivity',
         startToCloseTimeout: 100,
+        retry: { maximumAttempts: 1 },
         execute: async (ctx) => {
           // Simulate long-running work that respects abort signal
           await new Promise<void>((resolve, reject) => {
@@ -235,6 +236,7 @@ describe('WorkflowEngine - Activity Timeout Handling', () => {
       const activity = defineActivity({
         name: 'namedActivity',
         startToCloseTimeout: 50,
+        retry: { maximumAttempts: 1 },
         onFailed: async (_taskId, _input, error) => {
           capturedError = error;
         },
