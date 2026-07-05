@@ -13,7 +13,7 @@ import {
   DeadLetterRecord,
 } from '../../core/types';
 import { SQLiteDriver, SQLiteRow } from './internal/SQLiteDriver';
-import { getSchemaStatements, SCHEMA_VERSION } from './internal/schema';
+import { getSchemaStatements, MIGRATIONS, SCHEMA_VERSION } from './internal/schema';
 
 /**
  * SQLite-based storage adapter.
@@ -28,27 +28,70 @@ export class SQLiteStorage implements Storage {
   }
 
   /**
-   * Initialize the database schema.
+   * Initialize the database schema, migrating older databases forward.
    * Must be called before using the storage.
+   *
+   * Versioning lives in PRAGMA user_version. A fresh database gets the
+   * full current schema; an existing one is migrated one version at a
+   * time, each migration + version bump in a single transaction, so a
+   * crash mid-migration leaves the database at the previous version.
    */
   async initialize(): Promise<void> {
     if (this.initialized) return;
 
-    const statements = getSchemaStatements();
-    for (const stmt of statements) {
-      await this.driver.execute(stmt);
+    const storedVersion = await this.getUserVersion();
+    const hasSchema = await this.hasExistingSchema();
+
+    if (!hasSchema) {
+      await this.driver.transaction(async () => {
+        for (const stmt of getSchemaStatements()) {
+          await this.driver.execute(stmt);
+        }
+        await this.setUserVersion(SCHEMA_VERSION);
+      });
+      this.initialized = true;
+      return;
     }
 
-    // Store schema version (for future migrations)
-    await this.driver.execute(
-      `CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT);`
-    );
-    await this.driver.execute(
-      `INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('version', ?);`,
-      [String(SCHEMA_VERSION)]
-    );
+    // Databases created before versioning report user_version 0.
+    let currentVersion = storedVersion === 0 ? 1 : storedVersion;
+    if (currentVersion > SCHEMA_VERSION) {
+      throw new Error(
+        `Database schema version ${currentVersion} is newer than this package supports (${SCHEMA_VERSION}). ` +
+          'Refusing to open — upgrade the endura package.'
+      );
+    }
+
+    for (const migration of MIGRATIONS) {
+      if (migration.toVersion <= currentVersion) continue;
+      await this.driver.transaction(async () => {
+        for (const stmt of migration.statements) {
+          await this.driver.execute(stmt);
+        }
+        await this.setUserVersion(migration.toVersion);
+      });
+      currentVersion = migration.toVersion;
+    }
 
     this.initialized = true;
+  }
+
+  private async getUserVersion(): Promise<number> {
+    const rows = await this.driver.query('PRAGMA user_version');
+    return Number(rows[0]?.['user_version'] ?? 0);
+  }
+
+  private async setUserVersion(version: number): Promise<void> {
+    // PRAGMA does not support bound parameters; version is a trusted
+    // integer from our own migration table.
+    await this.driver.execute(`PRAGMA user_version = ${Math.floor(version)}`);
+  }
+
+  private async hasExistingSchema(): Promise<boolean> {
+    const rows = await this.driver.query(
+      `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'executions'`
+    );
+    return rows.length > 0;
   }
 
   private notifySubscribers(change: StorageChange): void {

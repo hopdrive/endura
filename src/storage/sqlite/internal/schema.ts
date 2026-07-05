@@ -103,6 +103,40 @@ export function getSchemaStatements(): string[] {
 }
 
 /**
- * Current schema version for migrations.
+ * Current schema version, stored in PRAGMA user_version.
+ *
+ * Version history:
+ * - v1: original schema (no failures/lease columns; unique index not
+ *   scoped to status='running'). Databases created before versioning
+ *   report user_version 0 and are treated as v1.
+ * - v2: activity_tasks gains failures, owner_id, lease_expires_at; the
+ *   executions unique index is rebuilt scoped to status='running'.
  */
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
+
+/**
+ * A single schema migration. Statements run in order inside one
+ * transaction; user_version is bumped in the same transaction.
+ */
+export interface Migration {
+  toVersion: number;
+  statements: string[];
+}
+
+/**
+ * Ordered migrations from each prior version to the next.
+ * Statements must not carry leading comments (drivers route DDL by the
+ * statement's first keyword).
+ */
+export const MIGRATIONS: Migration[] = [
+  {
+    toVersion: 2,
+    statements: [
+      `ALTER TABLE activity_tasks ADD COLUMN failures INTEGER NOT NULL DEFAULT 0;`,
+      `ALTER TABLE activity_tasks ADD COLUMN owner_id TEXT;`,
+      `ALTER TABLE activity_tasks ADD COLUMN lease_expires_at INTEGER;`,
+      `DROP INDEX IF EXISTS idx_executions_unique_key;`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_executions_unique_key_running ON executions(workflow_name, unique_key) WHERE unique_key IS NOT NULL AND status = 'running';`,
+    ],
+  },
+];
