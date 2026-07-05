@@ -27,9 +27,11 @@ CREATE TABLE IF NOT EXISTS executions (
 -- Index for querying by status
 CREATE INDEX IF NOT EXISTS idx_executions_status ON executions(status);
 
--- Index for unique key constraint
-CREATE UNIQUE INDEX IF NOT EXISTS idx_executions_unique_key
-  ON executions(workflow_name, unique_key) WHERE unique_key IS NOT NULL;
+-- Unique key constraint: at most one RUNNING execution per key. Scoped to
+-- status='running' so completed/failed history neither blocks key reuse
+-- nor gets destroyed by it.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_executions_unique_key_running
+  ON executions(workflow_name, unique_key) WHERE unique_key IS NOT NULL AND status = 'running';
 
 -- Activity tasks table
 CREATE TABLE IF NOT EXISTS activity_tasks (

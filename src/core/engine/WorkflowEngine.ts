@@ -267,23 +267,6 @@ export class WorkflowEngine {
     const now = this.clock.now();
     const runId = generateId();
 
-    // Handle uniqueness constraint
-    if (options.uniqueKey) {
-      const canUse = await this.storage.setUniqueKey(workflow.name, options.uniqueKey, runId);
-      if (!canUse) {
-        const existingRunId = await this.storage.getUniqueKey(workflow.name, options.uniqueKey);
-        if (existingRunId) {
-          if (options.onConflict === 'ignore') {
-            const existing = await this.storage.getExecution(existingRunId);
-            if (existing) {
-              return existing;
-            }
-          }
-          throw new UniqueConstraintError(workflow.name, options.uniqueKey, existingRunId);
-        }
-      }
-    }
-
     const firstActivity = workflow.activities[0];
     if (!firstActivity) {
       throw new Error(`Workflow '${workflow.name}' has no activities`);
@@ -303,13 +286,51 @@ export class WorkflowEngine {
       updatedAt: now,
     };
 
-    // The execution row and its first task must land together — a crash
-    // between the two writes strands the workflow 'running' with nothing
-    // scheduled to run.
-    await this.storage.transaction(async () => {
-      await this.storage.saveExecution(execution);
-      await this.scheduleActivityTask(execution, firstActivity, execution.state);
-    });
+    // The uniqueness check, the execution row, and its first task must
+    // land together: a crash between writes strands the workflow, and a
+    // check outside the transaction races other starters. The partial
+    // unique index (one 'running' execution per key) is the final
+    // arbiter for races the read cannot see.
+    let existingExecution: WorkflowExecution | null = null;
+    try {
+      await this.storage.transaction(async () => {
+        if (options.uniqueKey) {
+          const canUse = await this.storage.setUniqueKey(workflow.name, options.uniqueKey, runId);
+          if (!canUse) {
+            const existingRunId = await this.storage.getUniqueKey(workflow.name, options.uniqueKey);
+            if (existingRunId) {
+              if (options.onConflict === 'ignore') {
+                existingExecution = await this.storage.getExecution(existingRunId);
+                if (existingExecution) {
+                  return;
+                }
+              }
+              throw new UniqueConstraintError(workflow.name, options.uniqueKey, existingRunId);
+            }
+          }
+        }
+
+        await this.storage.saveExecution(execution);
+        await this.scheduleActivityTask(execution, firstActivity, execution.state);
+      });
+    } catch (err) {
+      // Translate a database-level unique violation (a racer that the
+      // pre-check couldn't see) into the same error as the checked path.
+      if (
+        options.uniqueKey &&
+        err instanceof Error &&
+        /unique constraint/i.test(err.message) &&
+        !(err instanceof UniqueConstraintError)
+      ) {
+        const existingRunId = await this.storage.getUniqueKey(workflow.name, options.uniqueKey);
+        throw new UniqueConstraintError(workflow.name, options.uniqueKey, existingRunId ?? 'unknown');
+      }
+      throw err;
+    }
+
+    if (existingExecution) {
+      return existingExecution;
+    }
 
     this.emitEvent({
       type: 'execution:started',

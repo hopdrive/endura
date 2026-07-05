@@ -241,9 +241,9 @@ export class SQLiteStorage implements Storage {
   }
 
   async deleteUniqueKey(_workflowName: string, _key: string): Promise<void> {
-    // Uniqueness is managed by the execution's unique_key column
-    // When an execution completes/fails, it's no longer "running" so the constraint is released
-    // No explicit deletion needed
+    // Intentionally a no-op for SQLite: the unique index is scoped to
+    // status='running', so the constraint releases automatically when the
+    // execution leaves 'running'.
   }
 
   // ============================================================================
