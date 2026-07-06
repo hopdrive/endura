@@ -124,4 +124,52 @@ describe('uniqueKey semantics (C7)', () => {
     await h.storage.saveExecution({ ...base, status: 'completed', completedAt: 2 });
     await expect(h.storage.saveExecution({ ...base, runId: 'r2' })).resolves.toBeUndefined();
   });
+
+  // Racing starts (parity issue P4-003): two concurrent start() calls on
+  // ONE engine interleave on the event loop. Before the operation lock,
+  // the second start's transaction() saw transactionDepth > 0 and JOINED
+  // the first start's open transaction — the loser's unique violation
+  // then rolled back the winner's rows too, and the "winner" returned a
+  // ghost execution that no longer existed in the database.
+  it("racing duplicate starts with onConflict:'ignore' converge on one real execution", async () => {
+    const h = await createHarness();
+
+    const [a, b] = await Promise.all([
+      h.engine.start(workflow, { input: { n: 1 }, uniqueKey: 'K', onConflict: 'ignore' }),
+      h.engine.start(workflow, { input: { n: 2 }, uniqueKey: 'K', onConflict: 'ignore' }),
+    ]);
+
+    expect(b.runId).toBe(a.runId);
+
+    // No ghosts: the surviving execution must actually exist, alone.
+    const running = await h.storage.getExecutionsByStatus('running');
+    expect(running).toHaveLength(1);
+    expect(running[0]!.runId).toBe(a.runId);
+    const tasks = await h.storage.getActivityTasksByStatus('pending');
+    expect(tasks).toHaveLength(1);
+  });
+
+  it('a racing duplicate with the default throw names the real winner', async () => {
+    const h = await createHarness();
+
+    const results = await Promise.allSettled([
+      h.engine.start(workflow, { input: { n: 1 }, uniqueKey: 'K' }),
+      h.engine.start(workflow, { input: { n: 2 }, uniqueKey: 'K' }),
+    ]);
+
+    const fulfilled = results.filter(r => r.status === 'fulfilled');
+    const rejected = results.filter(r => r.status === 'rejected');
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+
+    const winner = (fulfilled[0] as PromiseFulfilledResult<WorkflowExecution>).value;
+    const error = (rejected[0] as PromiseRejectedResult).reason as UniqueConstraintError;
+    expect(error).toBeInstanceOf(UniqueConstraintError);
+    expect(error.existingRunId).toBe(winner.runId);
+
+    // The winner's rows survived the loser's failure.
+    const running = await h.storage.getExecutionsByStatus('running');
+    expect(running).toHaveLength(1);
+    expect(running[0]!.runId).toBe(winner.runId);
+  });
 });
