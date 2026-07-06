@@ -10,6 +10,11 @@ import { nonRecoverablePipeline } from './nonRecoverablePipeline';
 import { offerBundleDedupe } from './offerBundleDedupe';
 import { offlineHoldResume } from './offlineHoldResume';
 import { offlineMidStage } from './offlineMidStage';
+import { foregroundBackgroundCollision } from './foregroundBackgroundCollision';
+import { staleResults } from './staleResults';
+import { upgradePendingWork } from './upgradePendingWork';
+import { runScopedRecovery } from './runScopedRecovery';
+import { backlogPriority } from './backlogPriority';
 
 /**
  * Scenario registry. Parity scenarios (categories 1-14 from the review)
@@ -27,4 +32,9 @@ export const scenarios: ParityScenario<ParityClient>[] = [
   offerBundleDedupe,
   offlineHoldResume,
   offlineMidStage,
+  foregroundBackgroundCollision,
+  staleResults,
+  upgradePendingWork,
+  runScopedRecovery,
+  backlogPriority,
 ];

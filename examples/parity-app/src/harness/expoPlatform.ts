@@ -13,6 +13,12 @@ import { HarnessPlatform } from './runner';
 export interface ParityClient extends ExpoWorkflowClient {
   /** Raw driver for side tables / direct inspection queries. */
   parityDriver: ExpoSqliteDriver;
+  /**
+   * Captured engine log lines ("level message json-context"), newest
+   * last — lets scenarios assert observability contracts like "the
+   * stale result was logged as discarded".
+   */
+  parityLogs: string[];
 }
 
 export const expoPlatform: HarnessPlatform<ParityClient> = {
@@ -21,14 +27,27 @@ export const expoPlatform: HarnessPlatform<ParityClient> = {
     const storage = new SQLiteStorage(driver);
     await storage.initialize();
 
+    const logs: string[] = [];
+    const capture = (level: string) => (message: string, context?: Record<string, unknown>) => {
+      logs.push(`${level} ${message} ${context ? JSON.stringify(context) : ''}`);
+      if (logs.length > 500) logs.shift();
+    };
+
     const client = (await ExpoWorkflowClient.create({
       storage,
       leaseDurationMs: 10000,
+      logger: {
+        debug: capture('debug'),
+        info: capture('info'),
+        warn: capture('warn'),
+        error: capture('error'),
+      },
       environment: {
         getNetworkState: async () => online(),
       },
     })) as ParityClient;
     client.parityDriver = driver;
+    client.parityLogs = logs;
     return client;
   },
 
