@@ -805,19 +805,26 @@ export class WorkflowEngine {
       },
     };
 
-    try {
-      // Race the activity against the abort signal. Awaiting the handler
-      // directly would let one hung handler (that ignores ctx.signal)
-      // wedge the serial engine forever. Once the abort wins, any late
-      // settlement of the handler is dropped — the failure already
-      // recorded must not be overwritten (stale-success guard).
-      const executePromise = Promise.resolve(activity.execute(context));
-      executePromise.catch(() => {
-        // Late rejection from a timed-out/abandoned handler: already
-        // handled (or superseded) via the race — never let it surface
-        // as an unhandled rejection.
-      });
+    // Race the activity against the abort signal. Awaiting the handler
+    // directly would let one hung handler (that ignores ctx.signal)
+    // wedge the serial engine forever. Once the abort wins, any late
+    // settlement of the handler is dropped — the failure already
+    // recorded must not be overwritten (stale-success guard).
+    // Async wrapper so a synchronous throw from execute() becomes a
+    // rejection handled by the same failure path as async errors.
+    const executePromise = (async () => activity.execute(context))();
+    let handlerSettled = false;
+    const markSettled = () => {
+      handlerSettled = true;
+    };
+    executePromise.then(markSettled, markSettled);
+    executePromise.catch(() => {
+      // Late rejection from a timed-out/abandoned handler: already
+      // handled (or superseded) via the race — never let it surface
+      // as an unhandled rejection.
+    });
 
+    try {
       let result: unknown;
       if (task.timeout > 0) {
         const abortPromise = new Promise<never>((_, reject) => {
@@ -854,6 +861,31 @@ export class WorkflowEngine {
       }
 
       const error = err instanceof Error ? err : new Error(String(err));
+
+      if (!handlerSettled) {
+        // The abort won the race and the handler is still running. Its
+        // eventual settlement is dropped by design, but the drop must be
+        // visible in logs — silence here hides hung handlers in production.
+        executePromise.then(
+          () => {
+            this.logger.info('Discarding late success from timed-out or aborted attempt', {
+              taskId: task.taskId,
+              activityName: task.activityName,
+              runId: task.runId,
+              attempt: task.attempts,
+            });
+          },
+          lateErr => {
+            this.logger.info('Discarding late failure from timed-out or aborted attempt', {
+              taskId: task.taskId,
+              activityName: task.activityName,
+              runId: task.runId,
+              attempt: task.attempts,
+              error: String(lateErr),
+            });
+          }
+        );
+      }
 
       // Handle failure
       await this.handleTaskFailure(task, activity, error);
