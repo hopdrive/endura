@@ -1,0 +1,10 @@
+{
+  "expo": {
+    "name": "endura-parity",
+    "slug": "parity-app",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "plugins": ["expo-sqlite"]
+  }
+}
