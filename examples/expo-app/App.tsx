@@ -16,6 +16,14 @@
  * - CANCEL mid-step sticks: no resurrection, no extra step runs (H3)
  * - opening a Phase 1 (schema v2) database migrates to the current schema
  *
+ * Phase 3 scenarios:
+ * - the 3-step workflow is built with chain() — typed step chaining
+ *   compiles under the app's TS and runs identically on Hermes (L4)
+ * - REACTIVE line rendered by useExecutionStats/useDeadLetters, driven
+ *   by Storage.subscribe with no polling; must track the polled list (M6)
+ * - START BIGSTATE produces an oversized output; the engine's size
+ *   warnings surface as SIZE-WARN lines via the client logger (M3)
+ *
  * All observable state is rendered as plain text lines so Maestro can
  * assert on it.
  */
@@ -23,9 +31,18 @@
 import { useEffect, useRef, useState } from 'react';
 import { Pressable, SafeAreaView, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { openDatabaseAsync } from 'expo-sqlite';
-import { defineActivity, Workflow, ActivityContext, NonRetryableError } from 'endura';
+import {
+  defineActivity,
+  defineWorkflow,
+  chain,
+  Workflow,
+  WorkflowEngine,
+  ActivityContext,
+  NonRetryableError,
+} from 'endura';
 import { SQLiteStorage, ExpoSqliteDriver } from 'endura/storage/sqlite';
 import { ExpoWorkflowClient } from 'endura/environmental/expo';
+import { useExecutionStats, useDeadLetters } from 'endura/react';
 
 const STEP_MS = 2500;
 const LEASE_MS = 10000;
@@ -33,6 +50,9 @@ const LEASE_MS = 10000;
 // FORCE RETRY flips this so the redriven 'failing' run can succeed —
 // simulating the outage that caused the dead letter having ended.
 const flags = { failingSucceeds: false };
+
+// Engine size warnings (M3) surface here; the component subscribes.
+const warnSink: { emit: (line: string) => void } = { emit: () => {} };
 
 function delay(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -66,7 +86,20 @@ async function createHarness(): Promise<Harness> {
     );`
   );
 
-  const client = await ExpoWorkflowClient.create({ storage, leaseDurationMs: LEASE_MS });
+  const client = await ExpoWorkflowClient.create({
+    storage,
+    leaseDurationMs: LEASE_MS,
+    logger: {
+      debug: () => {},
+      info: () => {},
+      error: () => {},
+      warn: (message: unknown) => {
+        const text = String(message);
+        if (/large activity result/i.test(text)) warnSink.emit('SIZE-WARN:result');
+        else if (/workflow state exceeds/i.test(text)) warnSink.emit('SIZE-WARN:state');
+      },
+    },
+  });
 
   const logStep = async (runId: string, step: string) => {
     await driver.execute(`INSERT INTO step_log (run_id, step, at) VALUES (?, ?, ?)`, [
@@ -76,21 +109,31 @@ async function createHarness(): Promise<Harness> {
     ]);
   };
 
-  const threeStep: Workflow = {
+  // Built with chain(): each step's declared input is the prior step's
+  // output, type-checked at compile time (L4). Names are unchanged from
+  // Phases 1-2 so old executions in this database still reconcile.
+  const makeStep = <TIn extends Record<string, unknown>, TOut extends Record<string, unknown>>(
+    step: string
+  ) =>
+    defineActivity<TIn, TOut>({
+      name: step,
+      startToCloseTimeout: 30000,
+      retry: { maximumAttempts: 3 },
+      execute: async (ctx: ActivityContext<TIn>) => {
+        await delay(STEP_MS, ctx.signal);
+        await logStep(ctx.runId, step);
+        return { [step]: true } as unknown as TOut;
+      },
+    });
+
+  const step1 = makeStep<Record<string, unknown>, { step1: boolean }>('step1');
+  const step2 = makeStep<{ step1: boolean }, { step2: boolean }>('step2');
+  const step3 = makeStep<{ step2: boolean }, { step3: boolean }>('step3');
+
+  const threeStep = defineWorkflow({
     name: 'threeStep',
-    activities: ['step1', 'step2', 'step3'].map(step =>
-      defineActivity({
-        name: step,
-        startToCloseTimeout: 30000,
-        retry: { maximumAttempts: 3 },
-        execute: async (ctx: ActivityContext) => {
-          await delay(STEP_MS, ctx.signal);
-          await logStep(ctx.runId, step);
-          return { [step]: true };
-        },
-      })
-    ),
-  };
+    activities: chain<Record<string, unknown>>().step(step1).step(step2).step(step3).activities,
+  });
 
   const failing: Workflow = {
     name: 'failing',
@@ -124,6 +167,20 @@ async function createHarness(): Promise<Harness> {
     ],
   };
 
+  const bigstate: Workflow = {
+    name: 'bigstate',
+    activities: [
+      defineActivity({
+        name: 'hugeOutput',
+        retry: { maximumAttempts: 2 },
+        // ~120 KB output: over the 64 KB default threshold, so the
+        // engine must warn for the result AND the merged state (M3)
+        // while the run still completes.
+        execute: async () => ({ blob: 'x'.repeat(120000) }),
+      }),
+    ],
+  };
+
   const keyed: Workflow = {
     name: 'keyed',
     activities: [
@@ -142,11 +199,27 @@ async function createHarness(): Promise<Harness> {
   client.registerWorkflow(failing);
   client.registerWorkflow(nonretry);
   client.registerWorkflow(keyed);
+  client.registerWorkflow(bigstate);
 
   // Continuous foreground engine loop; intentionally not awaited.
   void client.start();
 
   return { client, storage, driver };
+}
+
+/**
+ * Rendered from useExecutionStats/useDeadLetters ONLY — no polling in
+ * this component. If Storage.subscribe doesn't fire on device, this
+ * line freezes while the polled list below keeps moving (M6).
+ */
+function ReactiveStatus({ engine }: { engine: WorkflowEngine }) {
+  const stats = useExecutionStats(engine);
+  const deadLetters = useDeadLetters(engine, false);
+  return (
+    <Text style={styles.reactive} testID="reactive-status">
+      {`REACTIVE run:${stats.running} done:${stats.completed} fail:${stats.failed} cancel:${stats.cancelled} dlq:${deadLetters.length}`}
+    </Text>
+  );
 }
 
 export default function App() {
@@ -157,6 +230,15 @@ export default function App() {
   const [lines, setLines] = useState<string[]>([]);
   const [keyedResult, setKeyedResult] = useState<string>('');
   const [actionResult, setActionResult] = useState<string>('');
+  const [sizeWarnings, setSizeWarnings] = useState<string[]>([]);
+
+  useEffect(() => {
+    warnSink.emit = line =>
+      setSizeWarnings(prev => (prev.includes(line) ? prev : [...prev, line]));
+    return () => {
+      warnSink.emit = () => {};
+    };
+  }, []);
 
   useEffect(() => {
     if (startedRef.current) return;
@@ -206,7 +288,9 @@ export default function App() {
                     ? ` nr:${byStep('nr')}`
                     : e.workflowName === 'failing'
                       ? ` redriven:${byStep('redriven')}`
-                      : '';
+                      : e.workflowName === 'bigstate'
+                        ? ` size:${JSON.stringify(e.state).length}`
+                        : '';
               return `${e.workflowName} ${e.runId.slice(0, 6)} ${e.status.toUpperCase()} cur:${e.currentActivityName}${stepInfo}`;
             });
 
@@ -284,6 +368,13 @@ export default function App() {
     })();
   };
 
+  const startBigState = () => {
+    const harness = harnessRef.current;
+    if (!harness) return;
+    const workflow = harness.client.engine.getWorkflow('bigstate')!;
+    void harness.client.engine.start(workflow, { input: {} });
+  };
+
   const startKeyed = () => {
     const harness = harnessRef.current;
     if (!harness) return;
@@ -333,10 +424,20 @@ export default function App() {
         <Pressable testID="cancel-three-step" style={styles.button} onPress={cancelNewestThreeStep}>
           <Text style={styles.buttonText}>CANCEL 3-STEP</Text>
         </Pressable>
+        <Pressable testID="start-bigstate" style={styles.button} onPress={startBigState}>
+          <Text style={styles.buttonText}>START BIGSTATE</Text>
+        </Pressable>
       </View>
+
+      {ready && harnessRef.current ? <ReactiveStatus engine={harnessRef.current.client.engine} /> : null}
 
       {keyedResult ? <Text style={styles.line}>{keyedResult}</Text> : null}
       {actionResult ? <Text style={styles.line}>{actionResult}</Text> : null}
+      {sizeWarnings.map(warning => (
+        <Text key={warning} style={styles.line}>
+          {warning}
+        </Text>
+      ))}
 
       <ScrollView style={styles.list} testID="execution-list">
         {lines.map((line, i) => (
@@ -353,6 +454,7 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#0b1020', paddingTop: 8 },
   title: { color: '#fff', fontSize: 20, fontWeight: '700', textAlign: 'center', marginTop: 8 },
   status: { color: '#7fd67f', fontSize: 14, textAlign: 'center', marginVertical: 8 },
+  reactive: { color: '#ffd479', fontFamily: 'Menlo', fontSize: 11, textAlign: 'center', marginBottom: 4 },
   buttons: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', gap: 8, marginBottom: 8 },
   button: { backgroundColor: '#2c4bff', paddingHorizontal: 10, paddingVertical: 10, borderRadius: 8 },
   buttonText: { color: '#fff', fontSize: 12, fontWeight: '700' },
