@@ -532,7 +532,12 @@ export interface Storage {
   deleteActivityTasksForExecution(runId: string): Promise<void>;
 
   // Queue Operations
-  getPendingActivityTasks(options?: { limit?: number; now?: number }): Promise<ActivityTask[]>;
+  /**
+   * Due pending tasks, priority-ordered. `now` is required: the caller
+   * owns time (the engine passes its injected Clock); storage must
+   * never fall back to Date.now().
+   */
+  getPendingActivityTasks(options: { limit?: number; now: number }): Promise<ActivityTask[]>;
   claimActivityTask(
     taskId: string,
     now: number,

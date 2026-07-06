@@ -68,16 +68,9 @@ export { conditions, always, whenConnected, whenDisconnected, afterDelay, all, a
 // Engine
 export { WorkflowEngine } from './engine';
 
-// Mocks
-export {
-  MockClock,
-  MockScheduler,
-  MockEnvironment,
-  MockEnvironmentState,
-  RealClock,
-  RealScheduler,
-  StubEnvironment,
-} from './mocks';
+// Default runtime implementations for Node/web consumers. Test doubles
+// (MockClock, MockScheduler, MockEnvironment) moved to 'endura/testing'.
+export { RealClock, RealScheduler, StubEnvironment } from './defaults';
 
 // Utils
 export {

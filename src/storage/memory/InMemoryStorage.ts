@@ -224,9 +224,8 @@ export class InMemoryStorage implements Storage {
   // Queue Operations
   // ============================================================================
 
-  async getPendingActivityTasks(options?: { limit?: number; now?: number }): Promise<ActivityTask[]> {
-    const now = options?.now ?? Date.now();
-    const limit = options?.limit ?? 100;
+  async getPendingActivityTasks(options: { limit?: number; now: number }): Promise<ActivityTask[]> {
+    const { now, limit = 100 } = options;
 
     const pending: ActivityTask[] = [];
     for (const task of this.tasks.values()) {
