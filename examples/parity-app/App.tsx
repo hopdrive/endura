@@ -23,11 +23,12 @@ import {
   Text,
   View,
 } from 'react-native';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { DemoEngineSession } from './src/harness/demoEngine';
 import { EngineInspection, inspectEngine } from './src/harness/engineInspection';
 import { useCases } from './src/content/useCases';
 import { countsForCard, UseCaseCard } from './src/ui/UseCaseCard';
-import { EnginePanel } from './src/ui/EnginePanel';
+import { EnginePanel, PANEL_COLLAPSED_HEIGHT } from './src/ui/EnginePanel';
 import { colors, spacing, type } from './src/ui/theme';
 
 const SCREEN_WIDTH = Dimensions.get('window').width;
@@ -86,13 +87,15 @@ export default function App() {
   );
 
   return (
-    <SafeAreaView style={styles.container}>
-      <View style={styles.header}>
-        <Text style={type.largeTitle}>Endura</Text>
-        <Text style={[type.subhead, styles.headerSubtitle]}>
-          Durable workflows for React Native — running live on this device
-        </Text>
-      </View>
+    <GestureHandlerRootView style={styles.root}>
+      <SafeAreaView style={styles.container}>
+        <View style={styles.content}>
+          <View style={styles.header}>
+            <Text style={type.largeTitle}>Endura</Text>
+            <Text style={[type.subhead, styles.headerSubtitle]}>
+              Durable workflows for React Native — running live on this device
+            </Text>
+          </View>
 
       <View style={styles.deck} onLayout={e => setDeckHeight(e.nativeEvent.layout.height)}>
         {deckHeight > 0 ? (
@@ -126,19 +129,24 @@ export default function App() {
         ) : null}
       </View>
 
-      <View style={styles.dots}>
-        {useCases.map((useCase, i) => (
-          <View key={useCase.id} style={[styles.dot, i === page && styles.dotActive]} />
-        ))}
-      </View>
+          <View style={styles.dots}>
+            {useCases.map((useCase, i) => (
+              <View key={useCase.id} style={[styles.dot, i === page && styles.dotActive]} />
+            ))}
+          </View>
+        </View>
 
-      <EnginePanel session={session} inspection={inspection} onDutyChanged={() => setOnDuty(session.isOnDuty())} />
-    </SafeAreaView>
+        <EnginePanel session={session} inspection={inspection} onDutyChanged={() => setOnDuty(session.isOnDuty())} />
+      </SafeAreaView>
+    </GestureHandlerRootView>
   );
 }
 
 const styles = StyleSheet.create({
+  root: { flex: 1 },
   container: { flex: 1, backgroundColor: colors.page },
+  /** The sheet overlays absolutely — keep the deck and dots clear of it. */
+  content: { flex: 1, paddingBottom: PANEL_COLLAPSED_HEIGHT },
   header: { paddingHorizontal: DECK_PADDING, paddingTop: spacing.sm, paddingBottom: spacing.md },
   headerSubtitle: { marginTop: 2 },
   deck: { flex: 1 },

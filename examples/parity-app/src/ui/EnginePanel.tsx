@@ -1,10 +1,10 @@
 /**
- * The Endura engine inspector.
+ * The Endura engine inspector — a standard draggable bottom sheet
+ * (@gorhom/bottom-sheet, the Apple-Maps interaction model).
  *
- * Docked at the bottom of every screen is a compact status bar with
- * live queue counters. Tapping it presents a NATIVE sheet (Modal with
- * pageSheet presentation — real iOS rounded corners, dimmed underlay,
- * swipe-down to dismiss) containing the full inspector:
+ * Collapsed, it is a compact status bar with live queue counters.
+ * Drag it up (it tracks your finger) or tap it and it expands to the
+ * full inspector, with a dimmed backdrop and rounded sheet corners:
  *
  *   Status — engine state, real radio connectivity, the on-duty app
  *            state switch, delivery endpoint, and reset.
@@ -18,18 +18,14 @@
  *   Tests  — the 15-scenario parity suite, runnable on this device.
  */
 
-import { useCallback, useState } from 'react';
-import {
-  Alert,
-  Modal,
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  Switch,
-  Text,
-  TextInput,
-  View,
-} from 'react-native';
+import { useCallback, useMemo, useRef, useState } from 'react';
+import { Alert, Pressable, StyleSheet, Switch, Text, View } from 'react-native';
+import BottomSheet, {
+  BottomSheetBackdrop,
+  BottomSheetBackdropProps,
+  BottomSheetScrollView,
+  BottomSheetTextInput,
+} from '@gorhom/bottom-sheet';
 import { ActivityTask } from 'endura';
 import { DemoEngineSession, DEFAULT_ENDPOINT } from '../harness/demoEngine';
 import { EngineInspection, JobPhase, JobRecord } from '../harness/engineInspection';
@@ -64,6 +60,9 @@ function dueIn(scheduledFor: number | undefined): string {
 
 type PanelTab = 'status' | 'setup' | 'jobs' | 'log' | 'tests';
 
+/** Height of the collapsed sheet — the docked status bar. */
+export const PANEL_COLLAPSED_HEIGHT = 132;
+
 export function EnginePanel({
   session,
   inspection,
@@ -74,9 +73,18 @@ export function EnginePanel({
   /** Lets the app re-render anything else showing duty state. */
   onDutyChanged?: () => void;
 }) {
-  const [open, setOpen] = useState(false);
+  const sheetRef = useRef<BottomSheet>(null);
+  const [expanded, setExpanded] = useState(false);
   const [tab, setTab] = useState<PanelTab>('status');
   const [selectedRun, setSelectedRun] = useState<string | null>(null);
+  const snapPoints = useMemo(() => [PANEL_COLLAPSED_HEIGHT, '88%'], []);
+
+  const renderBackdrop = useCallback(
+    (props: BottomSheetBackdropProps) => (
+      <BottomSheetBackdrop {...props} appearsOnIndex={1} disappearsOnIndex={0} pressBehavior="collapse" />
+    ),
+    []
+  );
 
   const counts = inspection?.counts;
   const queued = counts ? counts.waiting + counts.held + counts.backoff : 0;
@@ -89,8 +97,26 @@ export function EnginePanel({
   const selectedJob = selectedRun ? inspection?.jobs.find(job => job.runId === selectedRun) : undefined;
 
   return (
-    <>
-      <Pressable testID="engine-status-bar" style={styles.dock} onPress={() => setOpen(true)}>
+    <BottomSheet
+      ref={sheetRef}
+      index={0}
+      snapPoints={snapPoints}
+      enableDynamicSizing={false}
+      enablePanDownToClose={false}
+      onChange={index => {
+        setExpanded(index >= 1);
+        if (index === 0) setSelectedRun(null);
+      }}
+      backdropComponent={renderBackdrop}
+      handleIndicatorStyle={styles.handleIndicator}
+      backgroundStyle={styles.sheetBackground}
+      style={styles.sheetShadow}
+    >
+      <Pressable
+        testID="engine-status-bar"
+        style={styles.dock}
+        onPress={() => sheetRef.current?.snapToIndex(expanded ? 0 : 1)}
+      >
         <View style={styles.dockHeader}>
           <View style={styles.dockTitleRow}>
             <View style={[styles.dot, { backgroundColor: session.isOpen() ? colors.green : colors.gray }]} />
@@ -103,7 +129,6 @@ export function EnginePanel({
               softColor={online ? colors.greenSoft : colors.orangeSoft}
             />
             {!onDuty ? <Pill label="Off Duty" color={colors.gray} softColor={colors.graySoft} /> : null}
-            <Text style={styles.dockChevron}>⌃</Text>
           </View>
         </View>
         <View style={styles.kpiRow}>
@@ -114,54 +139,38 @@ export function EnginePanel({
         </View>
       </Pressable>
 
-      <Modal
-        visible={open}
-        animationType="slide"
-        presentationStyle="pageSheet"
-        onRequestClose={() => setOpen(false)}
-      >
-        <View style={styles.sheet}>
-          <View style={styles.sheetHeader}>
-            <View style={styles.sheetHeaderSide} />
-            <Text style={type.headline}>Endura Engine</Text>
-            <Pressable testID="panel-done" style={styles.sheetHeaderSide} onPress={() => setOpen(false)}>
-              <Text style={styles.doneText}>Done</Text>
-            </Pressable>
-          </View>
-          <View style={styles.tabsWrap}>
-            <SegmentedTabs<PanelTab>
-              tabs={[
-                { key: 'status', label: 'Status' },
-                { key: 'setup', label: 'Setup' },
-                { key: 'jobs', label: 'Jobs' },
-                { key: 'log', label: 'Log' },
-                { key: 'tests', label: 'Tests' },
-              ]}
-              active={tab}
-              onChange={next => {
-                setTab(next);
-                setSelectedRun(null);
-              }}
-              testIDPrefix="panel-tab"
-            />
-          </View>
+      <View style={styles.tabsWrap}>
+        <SegmentedTabs<PanelTab>
+          tabs={[
+            { key: 'status', label: 'Status' },
+            { key: 'setup', label: 'Setup' },
+            { key: 'jobs', label: 'Jobs' },
+            { key: 'log', label: 'Log' },
+            { key: 'tests', label: 'Tests' },
+          ]}
+          active={tab}
+          onChange={next => {
+            setTab(next);
+            setSelectedRun(null);
+          }}
+          testIDPrefix="panel-tab"
+        />
+      </View>
 
-          <ScrollView style={styles.sheetScroll} contentContainerStyle={styles.sheetContent}>
-            {tab === 'status' ? <StatusTab session={session} inspection={inspection} onDutyChanged={onDutyChanged} /> : null}
-            {tab === 'setup' ? <SetupTab session={session} /> : null}
-            {tab === 'jobs' ? (
-              selectedJob ? (
-                <JobDetail job={selectedJob} session={session} onBack={() => setSelectedRun(null)} />
-              ) : (
-                <JobsTab inspection={inspection} onSelect={setSelectedRun} />
-              )
-            ) : null}
-            {tab === 'log' ? <LogTab inspection={inspection} /> : null}
-            {tab === 'tests' ? <TestsTab /> : null}
-          </ScrollView>
-        </View>
-      </Modal>
-    </>
+      <BottomSheetScrollView style={styles.sheetScroll} contentContainerStyle={styles.sheetContent}>
+        {tab === 'status' ? <StatusTab session={session} inspection={inspection} onDutyChanged={onDutyChanged} /> : null}
+        {tab === 'setup' ? <SetupTab session={session} /> : null}
+        {tab === 'jobs' ? (
+          selectedJob ? (
+            <JobDetail job={selectedJob} session={session} onBack={() => setSelectedRun(null)} />
+          ) : (
+            <JobsTab inspection={inspection} onSelect={setSelectedRun} />
+          )
+        ) : null}
+        {tab === 'log' ? <LogTab inspection={inspection} /> : null}
+        {tab === 'tests' ? <TestsTab /> : null}
+      </BottomSheetScrollView>
+    </BottomSheet>
   );
 }
 
@@ -255,7 +264,7 @@ function StatusTab({
 
       <SectionHeader>Delivery Endpoint</SectionHeader>
       <Card style={styles.groupCard}>
-        <TextInput
+        <BottomSheetTextInput
           testID="panel-endpoint-input"
           style={styles.endpointInput}
           value={endpointDraft}
@@ -672,42 +681,35 @@ function TestsTab() {
 // --- Styles ------------------------------------------------------------------
 
 const styles = StyleSheet.create({
-  dock: {
+  sheetBackground: {
     backgroundColor: colors.card,
     borderTopLeftRadius: radius.xl,
     borderTopRightRadius: radius.xl,
-    paddingHorizontal: spacing.lg,
-    paddingTop: spacing.sm,
-    paddingBottom: spacing.xs,
+  },
+  sheetShadow: {
     shadowColor: '#000000',
-    shadowOpacity: 0.1,
+    shadowOpacity: 0.12,
     shadowRadius: 18,
     shadowOffset: { width: 0, height: -6 },
-    elevation: 10,
+    elevation: 12,
+  },
+  handleIndicator: { backgroundColor: colors.tertiaryLabel, width: 40 },
+  dock: {
+    paddingHorizontal: spacing.lg,
+    paddingBottom: spacing.xs,
   },
   dockHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   dockTitleRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.xs },
   dot: { width: 9, height: 9, borderRadius: 5 },
   dockPills: { flexDirection: 'row', alignItems: 'center', gap: spacing.xs },
-  dockChevron: { fontSize: 15, fontWeight: '600', color: colors.tertiaryLabel, marginLeft: 2 },
   kpiRow: { flexDirection: 'row', marginTop: spacing.sm, marginBottom: spacing.xxs },
   kpiCell: { flex: 1, alignItems: 'center' },
   kpiValue: { fontSize: 22, fontWeight: '700', color: colors.label },
   kpiLabel: { ...type.caption, marginTop: 1 },
 
-  sheet: { flex: 1, backgroundColor: colors.page },
-  sheetHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: spacing.lg,
-    paddingTop: spacing.md,
-    paddingBottom: spacing.xs,
-  },
-  sheetHeaderSide: { width: 60, minHeight: 30, justifyContent: 'center' },
-  doneText: { fontSize: 17, fontWeight: '600', color: colors.tint, textAlign: 'right' },
-  tabsWrap: { paddingHorizontal: spacing.lg, paddingBottom: spacing.xs },
-  sheetScroll: { flex: 1 },
+  /** Top padding keeps the tabs fully below the collapsed fold. */
+  tabsWrap: { paddingHorizontal: spacing.lg, paddingTop: spacing.xl, paddingBottom: spacing.xs },
+  sheetScroll: { flex: 1, backgroundColor: colors.page },
   sheetContent: { paddingHorizontal: spacing.lg, paddingBottom: spacing.xxl },
 
   groupCard: { marginVertical: 0, paddingVertical: spacing.xxs },
