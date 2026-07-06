@@ -178,10 +178,25 @@ export class FieldTestSession {
     await client.close();
   }
 
-  /** Explicit, destructive reset — the ONLY way field state is wiped. */
+  /**
+   * Explicit, destructive reset — the ONLY way field state is wiped.
+   * Wipes tables through the open connection (a file delete can
+   * silently fail while a recently-ticking client still holds the
+   * handle), then closes and deletes the file as best-effort cleanup.
+   */
   async reset(): Promise<void> {
+    await this.open();
+    const client = this.required();
+    client.stop(); // no tick mid-flight while we wipe
+    const tables = await client.parityDriver.query(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '%migration%' AND name NOT LIKE '%schema%'"
+    );
+    for (const row of tables) {
+      await client.parityDriver.execute(`DELETE FROM "${String(row.name)}"`);
+    }
     await this.close();
     await expoPlatform.deleteDatabase(DB_NAME);
+    this.jobCounter = 0;
     await this.open();
   }
 
