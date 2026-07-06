@@ -26,6 +26,7 @@ import BottomSheet, {
   BottomSheetScrollView,
   BottomSheetTextInput,
 } from '@gorhom/bottom-sheet';
+import PagerView from 'react-native-pager-view';
 import { ActivityTask } from 'endura';
 import { DemoEngineSession, DEFAULT_ENDPOINT } from '../harness/demoEngine';
 import { EngineInspection, JobPhase, JobRecord } from '../harness/engineInspection';
@@ -60,6 +61,14 @@ function dueIn(scheduledFor: number | undefined): string {
 
 type PanelTab = 'status' | 'setup' | 'jobs' | 'log' | 'tests';
 
+const PANEL_TABS: Array<{ key: PanelTab; label: string }> = [
+  { key: 'status', label: 'Status' },
+  { key: 'setup', label: 'Setup' },
+  { key: 'jobs', label: 'Jobs' },
+  { key: 'log', label: 'Log' },
+  { key: 'tests', label: 'Tests' },
+];
+
 /** Height of the collapsed sheet — the docked status bar. */
 export const PANEL_COLLAPSED_HEIGHT = 132;
 
@@ -74,6 +83,7 @@ export function EnginePanel({
   onDutyChanged?: () => void;
 }) {
   const sheetRef = useRef<BottomSheet>(null);
+  const pagerRef = useRef<PagerView>(null);
   const [expanded, setExpanded] = useState(false);
   const [tab, setTab] = useState<PanelTab>('status');
   const [selectedRun, setSelectedRun] = useState<string | null>(null);
@@ -141,35 +151,56 @@ export function EnginePanel({
 
       <View style={styles.tabsWrap}>
         <SegmentedTabs<PanelTab>
-          tabs={[
-            { key: 'status', label: 'Status' },
-            { key: 'setup', label: 'Setup' },
-            { key: 'jobs', label: 'Jobs' },
-            { key: 'log', label: 'Log' },
-            { key: 'tests', label: 'Tests' },
-          ]}
+          tabs={PANEL_TABS}
           active={tab}
           onChange={next => {
             setTab(next);
             setSelectedRun(null);
+            pagerRef.current?.setPage(PANEL_TABS.findIndex(t => t.key === next));
           }}
           testIDPrefix="panel-tab"
         />
       </View>
 
-      <BottomSheetScrollView style={styles.sheetScroll} contentContainerStyle={styles.sheetContent}>
-        {tab === 'status' ? <StatusTab session={session} inspection={inspection} onDutyChanged={onDutyChanged} /> : null}
-        {tab === 'setup' ? <SetupTab session={session} /> : null}
-        {tab === 'jobs' ? (
-          selectedJob ? (
-            <JobDetail job={selectedJob} session={session} onBack={() => setSelectedRun(null)} />
-          ) : (
-            <JobsTab inspection={inspection} onSelect={setSelectedRun} />
-          )
-        ) : null}
-        {tab === 'log' ? <LogTab inspection={inspection} /> : null}
-        {tab === 'tests' ? <TestsTab /> : null}
-      </BottomSheetScrollView>
+      <PagerView
+        ref={pagerRef}
+        style={styles.pager}
+        initialPage={0}
+        onPageSelected={e => {
+          setTab(PANEL_TABS[e.nativeEvent.position].key);
+          setSelectedRun(null);
+        }}
+      >
+        <View key="status" style={styles.page}>
+          <BottomSheetScrollView contentContainerStyle={styles.sheetContent}>
+            <StatusTab session={session} inspection={inspection} onDutyChanged={onDutyChanged} />
+          </BottomSheetScrollView>
+        </View>
+        <View key="setup" style={styles.page}>
+          <BottomSheetScrollView contentContainerStyle={styles.sheetContent}>
+            <SetupTab session={session} />
+          </BottomSheetScrollView>
+        </View>
+        <View key="jobs" style={styles.page}>
+          <BottomSheetScrollView contentContainerStyle={styles.sheetContent}>
+            {selectedJob ? (
+              <JobDetail job={selectedJob} session={session} onBack={() => setSelectedRun(null)} />
+            ) : (
+              <JobsTab inspection={inspection} onSelect={setSelectedRun} />
+            )}
+          </BottomSheetScrollView>
+        </View>
+        <View key="log" style={styles.page}>
+          <BottomSheetScrollView contentContainerStyle={styles.sheetContent}>
+            <LogTab inspection={inspection} />
+          </BottomSheetScrollView>
+        </View>
+        <View key="tests" style={styles.page}>
+          <BottomSheetScrollView contentContainerStyle={styles.sheetContent}>
+            <TestsTab />
+          </BottomSheetScrollView>
+        </View>
+      </PagerView>
     </BottomSheet>
   );
 }
@@ -709,7 +740,8 @@ const styles = StyleSheet.create({
 
   /** Top padding keeps the tabs fully below the collapsed fold. */
   tabsWrap: { paddingHorizontal: spacing.lg, paddingTop: spacing.xl, paddingBottom: spacing.xs },
-  sheetScroll: { flex: 1, backgroundColor: colors.page },
+  pager: { flex: 1, backgroundColor: colors.page },
+  page: { flex: 1 },
   sheetContent: { paddingHorizontal: spacing.lg, paddingBottom: spacing.xxl },
 
   groupCard: { marginVertical: 0, paddingVertical: spacing.xxs },
