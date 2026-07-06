@@ -147,32 +147,27 @@ export class ExpoWorkflowClient {
   }
 
   /**
-   * Start the workflow engine.
-   * Begins processing pending activities.
+   * Start the workflow engine loop. Delegates to engine.run(), so it
+   * honors stop(), uses the injected Clock/Scheduler, and contains
+   * per-tick errors. Resolves when the lifespan elapses or stop() is
+   * called.
    *
    * @param options - Optional configuration for the tick loop
    * @param options.lifespan - Maximum time to run in milliseconds (useful for background tasks)
-   * @param options.tickInterval - Interval between ticks in milliseconds (default: 100)
+   * @param options.tickInterval - Idle sleep between ticks in milliseconds (default: 100)
    */
   async start(options?: { lifespan?: number; tickInterval?: number }): Promise<void> {
-    const tickInterval = options?.tickInterval ?? 100;
-    const deadline = options?.lifespan ? Date.now() + options.lifespan : null;
-    const safetyBuffer = 500;
+    await this.engine.run({
+      lifespan: options?.lifespan,
+      tickInterval: options?.tickInterval,
+    });
+  }
 
-    while (true) {
-      // Check deadline
-      if (deadline && Date.now() >= deadline - safetyBuffer) {
-        break;
-      }
-
-      await this.engine.tick();
-
-      // Wait before next tick
-      await new Promise(resolve => setTimeout(resolve, tickInterval));
-
-      // If we processed nothing and no deadline, keep the loop running
-      // In a real app, you might want to add an explicit stop() method
-    }
+  /**
+   * Stop a running start() loop. Safe to call when not running.
+   */
+  stop(): void {
+    this.engine.stop();
   }
 
   /**
@@ -184,9 +179,12 @@ export class ExpoWorkflowClient {
   }
 
   /**
-   * Close the client and release resources.
+   * Close the client and release resources: stops the engine loop,
+   * disposes the environment's refresh interval, and closes storage.
    */
   async close(): Promise<void> {
+    this.engine.stop();
+    this.environment.dispose();
     if ('close' in this.storage && typeof this.storage.close === 'function') {
       await (this.storage as { close: () => Promise<void> }).close();
     }

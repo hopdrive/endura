@@ -513,7 +513,7 @@ export class WorkflowEngine {
 
         // If no work was done, sleep briefly
         if (processed === 0) {
-          await this.scheduler.sleep(100);
+          await this.scheduler.sleep(options?.tickInterval ?? 100);
         }
       }
     } finally {

@@ -323,6 +323,8 @@ export interface StartWorkflowOptions<TInput = Record<string, unknown>> {
 export interface TickOptions {
   /** Max time to run in ms (for background mode) */
   lifespan?: number;
+  /** Idle sleep between ticks when no work was processed (default 100ms) */
+  tickInterval?: number;
 }
 
 /**

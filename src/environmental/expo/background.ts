@@ -1,6 +1,8 @@
 /**
  * Background task registration for Expo.
- * Integrates with expo-task-manager and expo-background-fetch.
+ * Integrates with expo-task-manager and expo-background-task (the
+ * successor to the deprecated expo-background-fetch — both APIs are
+ * supported via the injected register/unregister functions).
  *
  * This module provides helpers for running the workflow engine
  * in the background on iOS and Android.
@@ -8,10 +10,15 @@
  * @example
  * ```typescript
  * // In your app's entry point (e.g., index.js or App.tsx)
- * import { registerBackgroundTask, WORKFLOW_BACKGROUND_TASK, runBackgroundWorkflowTask } from 'endura/environmental/expo';
+ * import {
+ *   registerBackgroundTask,
+ *   WORKFLOW_BACKGROUND_TASK,
+ *   runBackgroundWorkflowTask,
+ *   toBackgroundTaskResult,
+ * } from 'endura/environmental/expo';
  * import { SQLiteStorage, ExpoSqliteDriver } from 'endura/storage/sqlite';
  * import * as TaskManager from 'expo-task-manager';
- * import * as BackgroundFetch from 'expo-background-fetch';
+ * import * as BackgroundTask from 'expo-background-task';
  * import { openDatabaseAsync } from 'expo-sqlite';
  * import { photoWorkflow, syncWorkflow } from './workflows';
  *
@@ -22,15 +29,19 @@
  *   const storage = new SQLiteStorage(driver);
  *   await storage.initialize();
  *
- *   return await runBackgroundWorkflowTask({
+ *   const result = await runBackgroundWorkflowTask({
  *     storage,
  *     workflows: [photoWorkflow, syncWorkflow],
  *     lifespan: 25000, // 25 seconds
  *   });
+ *   return toBackgroundTaskResult(result);
  * });
  *
- * // Register for periodic execution
- * registerBackgroundTask();
+ * // Register for periodic execution (expo-background-task takes
+ * // minimumInterval in MINUTES)
+ * await registerBackgroundTask(BackgroundTask.registerTaskAsync, {
+ *   minimumInterval: 15,
+ * });
  * ```
  */
 
@@ -50,6 +61,25 @@ export enum BackgroundFetchResult {
   NoData = 1,
   NewData = 2,
   Failed = 3,
+}
+
+/**
+ * Background task result enum.
+ * Mirrors BackgroundTask.BackgroundTaskResult from expo-background-task.
+ */
+export enum BackgroundTaskResult {
+  Success = 1,
+  Failed = 2,
+}
+
+/**
+ * Map a BackgroundFetchResult onto expo-background-task's coarser
+ * result type (which has no NoData/NewData distinction).
+ */
+export function toBackgroundTaskResult(result: BackgroundFetchResult): BackgroundTaskResult {
+  return result === BackgroundFetchResult.Failed
+    ? BackgroundTaskResult.Failed
+    : BackgroundTaskResult.Success;
 }
 
 /**
@@ -130,10 +160,19 @@ export async function runBackgroundWorkflowTask(
   try {
     await options.onStart?.();
 
+    // Count real work so the OS gets an honest fetch result — always
+    // reporting NewData degrades iOS background scheduling.
+    let processedCount = 0;
+
     // Create the client
     const client = await ExpoWorkflowClient.create({
       storage: options.storage,
       environment: options.environment,
+      onEvent: event => {
+        if (event.type === 'activity:completed') {
+          processedCount++;
+        }
+      },
     });
 
     // Register all workflows (the engine erases input generics internally)
@@ -147,9 +186,9 @@ export async function runBackgroundWorkflowTask(
     // Clean up
     await client.close();
 
-    await options.onComplete?.(0); // TODO: track actual processed count
+    await options.onComplete?.(processedCount);
 
-    return BackgroundFetchResult.NewData;
+    return processedCount > 0 ? BackgroundFetchResult.NewData : BackgroundFetchResult.NoData;
   } catch (error) {
     await options.onError?.(error instanceof Error ? error : new Error(String(error)));
     return BackgroundFetchResult.Failed;
@@ -167,8 +206,10 @@ export interface RegisterBackgroundTaskOptions {
   taskName?: string;
 
   /**
-   * Minimum interval between background executions in seconds.
-   * @default 900 (15 minutes)
+   * Minimum interval between background executions, in the unit your
+   * background API expects: MINUTES for expo-background-task
+   * (recommended), seconds for the deprecated expo-background-fetch.
+   * @default 15 (15 minutes with expo-background-task)
    */
   minimumInterval?: number;
 
@@ -190,15 +231,16 @@ export interface RegisterBackgroundTaskOptions {
  *
  * You must call this after defining the task with TaskManager.defineTask.
  *
- * @param registerTaskAsync - The registerTaskAsync function from expo-background-fetch
+ * @param registerTaskAsync - The registerTaskAsync function from
+ *   expo-background-task (or the deprecated expo-background-fetch)
  * @param options - Registration options
  *
  * @example
  * ```typescript
- * import * as BackgroundFetch from 'expo-background-fetch';
+ * import * as BackgroundTask from 'expo-background-task';
  *
- * await registerBackgroundTask(BackgroundFetch.registerTaskAsync, {
- *   minimumInterval: 60 * 15, // Every 15 minutes
+ * await registerBackgroundTask(BackgroundTask.registerTaskAsync, {
+ *   minimumInterval: 15, // minutes
  * });
  * ```
  */
@@ -216,7 +258,7 @@ export async function registerBackgroundTask(
   const taskName = options.taskName ?? WORKFLOW_BACKGROUND_TASK;
 
   await registerTaskAsync(taskName, {
-    minimumInterval: options.minimumInterval ?? 60 * 15, // 15 minutes
+    minimumInterval: options.minimumInterval ?? 15, // minutes (expo-background-task)
     stopOnTerminate: options.stopOnTerminate ?? false,
     startOnBoot: options.startOnBoot ?? true,
   });
@@ -225,7 +267,8 @@ export async function registerBackgroundTask(
 /**
  * Unregister the workflow background task.
  *
- * @param unregisterTaskAsync - The unregisterTaskAsync function from expo-background-fetch
+ * @param unregisterTaskAsync - The unregisterTaskAsync function from
+ *   expo-background-task (or the deprecated expo-background-fetch)
  * @param taskName - Task name to unregister
  */
 export async function unregisterBackgroundTask(
