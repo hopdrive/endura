@@ -7,11 +7,13 @@
  * database file; reset deletes the file.
  */
 
-import { useCallback, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { Pressable, SafeAreaView, ScrollView, Share, StyleSheet, Text, View } from 'react-native';
 import { ScenarioResult } from './src/harness/types';
 import { runScenario, ParityScenario } from './src/harness/runner';
 import { expoPlatform, ParityClient } from './src/harness/expoPlatform';
+import { InspectorSession } from './src/harness/inspector';
+import { InspectorPanel } from './src/InspectorPanel';
 import { scenarios } from './src/scenarios';
 
 type RunState = 'idle' | 'running' | 'passed' | 'failed';
@@ -21,6 +23,16 @@ export default function App() {
   const [runStates, setRunStates] = useState<Record<string, RunState>>({});
   const [selected, setSelected] = useState<string | null>(null);
   const [liveLog, setLiveLog] = useState<string[]>([]);
+  const [inspecting, setInspecting] = useState(false);
+  const inspectorRef = useRef<InspectorSession | null>(null);
+  if (!inspectorRef.current) inspectorRef.current = new InspectorSession();
+
+  const toggleInspector = useCallback(() => {
+    setInspecting(prev => {
+      if (prev) void inspectorRef.current?.close();
+      return !prev;
+    });
+  }, []);
 
   const run = useCallback(async (scenario: ParityScenario<ParityClient>) => {
     setRunStates(prev => ({ ...prev, [scenario.scenarioId]: 'running' }));
@@ -71,8 +83,16 @@ export default function App() {
         <Pressable testID="export-report" style={styles.button} onPress={() => void exportReport()}>
           <Text style={styles.buttonText}>EXPORT JSON</Text>
         </Pressable>
+        <Pressable testID="toggle-inspector" style={styles.button} onPress={toggleInspector}>
+          <Text style={styles.buttonText}>{inspecting ? 'SCENARIOS' : 'INSPECTOR'}</Text>
+        </Pressable>
       </View>
 
+      {inspecting ? (
+        <ScrollView style={styles.list}>
+          <InspectorPanel session={inspectorRef.current} />
+        </ScrollView>
+      ) : (
       <ScrollView style={styles.list}>
         {scenarios.map(scenario => {
           const state = runStates[scenario.scenarioId] ?? 'idle';
@@ -114,6 +134,7 @@ export default function App() {
 
         {selectedResult ? <ResultDetail result={selectedResult} /> : null}
       </ScrollView>
+      )}
     </SafeAreaView>
   );
 }
