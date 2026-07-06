@@ -4,10 +4,23 @@ import { selfTest } from './selftest';
 import { photoParity } from './photoParity';
 import { outcomeDraftSync } from './outcomeDraftSync';
 import { outcomeSubmit } from './outcomeSubmit';
+import { moveSyncPermanentFailure } from './moveSyncPermanentFailure';
+import { recoveryAgeGate } from './recoveryAgeGate';
+import { nonRecoverablePipeline } from './nonRecoverablePipeline';
+import { offerBundleDedupe } from './offerBundleDedupe';
 
 /**
  * Scenario registry. Parity scenarios (categories 1-14 from the review)
  * are added here as they are implemented; the harness renders whatever
  * is registered.
  */
-export const scenarios: ParityScenario<ParityClient>[] = [selfTest, photoParity, outcomeDraftSync, outcomeSubmit];
+export const scenarios: ParityScenario<ParityClient>[] = [
+  selfTest,
+  photoParity,
+  outcomeDraftSync,
+  outcomeSubmit,
+  moveSyncPermanentFailure,
+  recoveryAgeGate,
+  nonRecoverablePipeline,
+  offerBundleDedupe,
+];
