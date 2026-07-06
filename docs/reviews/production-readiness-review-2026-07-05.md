@@ -367,6 +367,561 @@ Prioritized; each would have caught a Critical/High issue above.
 
 Typed step-to-step chaining; `state`-size guardrails/documented output contract (M3); move mocks out of the root export (M5); fake-timer test harness + CI build step (M7); backoff jitter; docs fixes and a second (web) example; `sideEffects` flag; wire `Storage.subscribe` into React hooks with a battery-friendly cadence.
 
+### Phase 4: Driver App Pipeline Parity and Expo Mobile Scenario Gate
+
+Phase 4 proves that Endura can replace the real `driver-app-3` pipeline and queue behavior, not just pass generic workflow engine tests.
+
+The current driver app does not use `@hopdrive/react-native-queue` as a simple background queue. It layers a durable pipeline system on top of RNQ using Realm-backed `Event` rows, worker sequences, per-stage payload accumulation, recovery by persisted stage name, stale-failure guards, permanent-failure classification, per-entity dedupe, and driver-facing recovery flows.
+
+Endura cannot be considered ready for the driver app rewrite until it can reproduce the important behaviors from that system inside the Expo test app.
+
+This phase is a required production gate.
+
+#### Source Implementation to Use as Ground Truth
+
+Use `hopdrive/driver-app-3` as the source of truth for current production behavior.
+
+The review must inspect at least:
+
+* `utils/event.ts`
+* `utils/queue.ts`
+* `utils/recovery.ts`
+* `pipelines/photo/index.ts`
+* `pipelines/outcomeSubmit/index.ts`
+* `pipelines/outcomeWorkflowDataSync/index.ts`
+* `pipelines/offerBundleProcess/index.ts`
+* All worker files under `pipelines/**`
+* Any existing tests under `__tests__/pipelines/**` and `__tests__/workers/**`
+* The HopDrive fork of `@hopdrive/react-native-queue`
+
+Do not rely on README files or architectural assumptions. Extract the behavior from code.
+
+#### Current Driver App Behaviors That Must Be Preserved
+
+The current system has several production behaviors that Endura must either preserve directly or replace with an intentionally documented alternative.
+
+##### 1. Event-backed pipeline state
+
+A pipeline start creates a durable `Event` row with:
+
+* `eventId`
+* pipeline type
+* current stage name
+* status
+* payload
+* moveId and/or driverId when available
+
+The first worker is then queued through RNQ unless the pipeline asks to run stage one synchronously.
+
+Endura must prove it can represent the same durable execution record and support inspection by move, run, workflow type, status, and current stage.
+
+##### 2. Worker sequence registration
+
+The current pipeline registry registers each worker in the sequence, calls worker `init(pipeline)` when present, records worker display metadata, and stores the pipeline by name.
+
+Endura must prove that all workflow definitions needed by the driver app can be registered centrally and that missing, renamed, or reordered workflow activities are handled safely during app upgrades.
+
+##### 3. Stage-level resume
+
+The current pipeline system does not simply restart an entire pipeline after failure. Recovery reads the failed `Event.stage`, maps that stage name back to the correct worker, and creates a new job for that stage with the accumulated event payload.
+
+Endura must prove that failed or interrupted workflows resume at the correct current activity with the accumulated prior state.
+
+##### 4. Payload accumulation
+
+`completeStage` snapshots the current event payload, merges in additional payload from the finished stage, and passes that accumulated payload into the next queued worker.
+
+Endura must prove that multi-stage workflows can pass stage outputs forward and that restart or recovery does not lose accumulated state.
+
+##### 5. Stale failure protection
+
+The current app has a guard that prevents a late failure from an old job attempt from downgrading an event that has already synced or advanced to another stage.
+
+Endura must prove that late success or late failure from timed-out work cannot overwrite newer execution state.
+
+##### 6. Permanently failed events
+
+The current app distinguishes ordinary `failed` events from `permanently_failed` events. Permanently failed events represent server-refused writes, such as row-filter rejection when a move has been reassigned or deleted. These are excluded from automatic recovery sweeps but remain inspectable so the UI can support a force retry flow.
+
+Endura must implement and prove equivalent behavior.
+
+##### 7. Manual recovery and force retry
+
+The current recovery system supports scoped recovery by move and mobility run. It can reset permanently failed events back to failed so they can be retried after dispatch fixes the underlying issue.
+
+Endura must support the same driver-facing recovery story.
+
+##### 8. Recovery age gate
+
+The current system avoids retry storms by skipping automatically recovered events older than a seven-day window unless a manual flow opts into stale recovery.
+
+Endura must prove it has an equivalent way to prevent old failed work from being re-armed forever.
+
+##### 9. Non-recoverable fire-and-forget pipelines
+
+Some pipelines are explicitly marked non-recoverable because replaying old failed work has no value or creates operational noise. Examples include app dump style operational flows and photo reaper style cleanup flows.
+
+Endura must support an explicit non-recoverable workflow classification.
+
+##### 10. Reconciliation before re-arm
+
+The current recovery path has special handling for photo events. If a photo pipeline failed locally but the corresponding photo is already uploaded or done on the server, recovery marks the event synced instead of re-arming a stale pre-upload stage.
+
+Endura must support workflow-specific recovery reconciliation hooks.
+
+##### 11. Per-entity dedupe
+
+The current system has both type-level and per-entity dedupe. For example, `offerBundleProcess.pipeline` dedupes by `offerId` so repeated refreshes do not queue the same heavy bundle process thousands of times while an earlier attempt is still pending.
+
+Endura must prove its uniqueness model can match this domain-level dedupe without destroying prior execution history.
+
+##### 12. Intentional no-dedupe workflows
+
+Not every workflow should be deduped. `outcomeWorkflowDataSync.pipeline` intentionally allows concurrent enqueues because stage 1 is idempotent and stage 2 merges workflow data. `outcomeSubmit.pipeline` also intentionally avoids dedupe because dropping a submit intent would lose a user action.
+
+Endura must not force a one-size-fits-all uniqueness model. It must support both deduped and intentionally non-deduped workflows.
+
+##### 13. Background and foreground queue behavior
+
+The current queue uses `expo-background-task`, initializes a single RNQ instance with an idempotency backstop, and exposes queue job/state listeners for app UI.
+
+Endura must prove foreground and background execution do not double-claim, reset, or falsely fail the same work.
+
+#### Required Pipeline Parity Inventory
+
+Create a `Driver App Pipeline Parity Inventory` table before implementing scenarios.
+
+For every pipeline under `driver-app-3/pipelines/**`, document:
+
+| Pipeline | Stages | Purpose | Domain Key | Dedup Behavior | Retry / Timeout Behavior | Connectivity Requirement | Recovery Behavior | Endura Scenario |
+| -------- | ------ | ------- | ---------- | -------------- | ------------------------ | ------------------------ | ----------------- | --------------- |
+
+Classify each pipeline as:
+
+* `Must Match`: required before Endura can replace the current driver app pipeline system
+* `Pilot Match`: required before the first Endura-backed pilot workflow
+* `Should Match`: required before broad rollout
+* `Nice to Match`: useful coverage but not a blocker
+* `Do Not Carry Forward`: old behavior that should intentionally be retired
+
+At minimum, the inventory must include:
+
+* `photo.pipeline`
+* `outcomeSubmit.pipeline`
+* `outcomeWorkflowDataSync.pipeline`
+* `moveStatusSync.pipeline`
+* `moveDriverStatusSync.pipeline`
+* `moveWorkflowOutputSync.pipeline`
+* `driverInfoSync.pipeline`
+* `driverStatusSync.pipeline`
+* `moveUpdateSync.pipeline`
+* `cancelMoveStatusSync.pipeline`
+* `deleteNonMatchingMovesSync.pipeline`
+* `sendAppDump.pipeline`
+* `sendEventLog.pipeline`
+* `prioritySyncComplete.pipeline`
+* `fuelAuthorizationSync.pipeline`
+* `fuelReimbursementSync.pipeline`
+* `offerStatusSync.pipeline`
+* `certificationComplete.pipeline`
+* `certificationSync.pipeline`
+* `gpsEventLogSync.pipeline`
+* `photoReaper.pipeline`
+* `mobilityRunSync.pipeline`
+* `mobilityStopSync.pipeline`
+* `mobilityVehicleSync.pipeline`
+* `serviceOrderSync.pipeline`
+* `offerBundleProcess.pipeline`
+* `offerMissedAssignments.pipeline`
+* any additional pipeline present in the repo
+
+#### Required Expo Mobile Scenarios
+
+Each scenario must run inside the Expo test app against the real Endura SQLite persistence layer.
+
+Node tests are not sufficient for this phase.
+
+Each scenario must provide:
+
+* One-tap reset
+* One-tap run
+* Simulated online/offline controls
+* Failure injection controls
+* Restart or reload simulation where possible
+* Background wake simulation where possible
+* Current execution state
+* Current task state
+* Dead-letter state
+* Structured pass/fail assertions
+* Debug log output
+
+##### Scenario 1: Photo Pipeline Parity
+
+Model `photo.pipeline`.
+
+The current photo pipeline sequence is:
+
+1. `photoCapture`
+2. `photoResize`
+3. `photoBlurHash`
+4. `photoPending`
+5. `photoUpload`
+6. `photoSave`
+
+The scenario must verify:
+
+* The six-stage order is preserved
+* Each stage receives accumulated payload from prior stages
+* Metadata produced by capture, resize, and blurhash survives through upload and save
+* A crash after resize resumes at blurhash
+* A crash after pending resumes at upload
+* A failed upload can retry without re-running successful prior stages unless explicitly required
+* A late failure from an old stage cannot mark the event failed after the workflow advanced
+* A successfully uploaded photo can be reconciled as complete instead of re-arming stale local work
+* The completed execution remains inspectable by move or service order context
+
+This is the highest-value pilot scenario because photo handling is a real multi-stage workflow with local files, payload accumulation, idempotency risk, and recovery complexity.
+
+##### Scenario 2: Outcome Draft Sync Parity
+
+Model `outcomeWorkflowDataSync.pipeline`.
+
+The current pipeline has two stages:
+
+1. `stage1CreateDraft`
+2. `stage2SyncWorkflowData`
+
+The scenario must verify:
+
+* Stage 1 creates or resolves a server-side draft outcome
+* Stage 2 receives the draft identity and merges workflow data
+* Multiple enqueues for the same local outcome are allowed
+* Concurrent or repeated workflow-data syncs converge safely
+* No user edits are dropped because a previous sync is already pending
+* Recovery resumes from the failed stage with accumulated payload
+
+This scenario proves Endura can support intentionally non-deduped idempotent sync workflows.
+
+##### Scenario 3: Outcome Submit Parity
+
+Model `outcomeSubmit.pipeline`.
+
+The current pipeline has three stages:
+
+1. `stage1CreateDraft`
+2. `stage2SyncWorkflowData`
+3. `stage3Submit`
+
+The scenario must verify:
+
+* Submit is only triggered by the submit pipeline, not by mid-fill sync
+* Draft creation and workflow-data sync happen before submit
+* Concurrent submit attempts do not double-submit
+* If the submit stage fails, recovery resumes at submit with the prior draft and workflow data intact
+* A duplicate submit is handled through domain idempotency or server guard behavior, not by silently dropping the user’s submit intent
+
+This scenario proves Endura can preserve user intent while still preventing duplicate business effects.
+
+##### Scenario 4: Move Sync Permanent Failure
+
+Model a move-related sync pipeline such as:
+
+* `moveStatusSync.pipeline`
+* `moveDriverStatusSync.pipeline`
+* `moveWorkflowOutputSync.pipeline`
+
+The scenario must verify:
+
+* A normal transient failure retries
+* A server-refused write is classified as permanently failed
+* Permanently failed work is excluded from automatic recovery
+* The failed state remains inspectable by move
+* Force Retry can reset it into a retryable state
+* Recovery then re-arms the correct stage
+* Retry resumes with the original payload and domain key
+
+This scenario is required before Endura can replace move-related sync work.
+
+##### Scenario 5: Recovery Age Gate
+
+Model a failed recoverable event.
+
+The scenario must verify:
+
+* Failed work newer than the recovery window is automatically eligible for recovery
+* Failed work older than the recovery window is skipped by automatic recovery
+* Manual recovery can opt into stale recovery
+* Skipped stale work does not create retry storms
+* The skipped reason is visible enough for debugging
+
+Use the current seven-day recovery window as the default parity target unless the team intentionally changes it.
+
+##### Scenario 6: Non-Recoverable Pipeline
+
+Model a fire-and-forget operational workflow such as an app dump or cleanup pipeline.
+
+The scenario must verify:
+
+* The workflow can fail
+* The failure is not surfaced as driver-recoverable work
+* Automatic recovery does not re-arm it
+* The workflow can be cleaned up or superseded by a future fresh run
+* The classification is explicit in the workflow definition
+
+This prevents a repeat of zombie operational events appearing in driver recovery screens.
+
+##### Scenario 7: Offer Bundle Per-Entity Dedupe
+
+Model `offerBundleProcess.pipeline`.
+
+The scenario must verify:
+
+* Two enqueue attempts for the same `offerId` while one is pending result in one active workflow
+* Enqueues for different `offerId` values both proceed
+* Reusing an `offerId` after completion does not destroy prior execution history
+* A racing duplicate enqueue cannot create two active workflows for the same offer
+* The dedupe decision is visible in the scenario log
+
+This scenario is required because Endura’s uniqueness behavior must match domain-level dedupe, not just generic workflow-name dedupe.
+
+##### Scenario 8: Offline Hold and Resume
+
+Model any sync pipeline that should not run without network.
+
+The scenario must verify:
+
+* Work can be enqueued offline
+* The activity is held rather than failed while the device is offline
+* Attempts are not burned while the activity is unrunnable
+* The hold reason is recorded or visible
+* Work resumes automatically when connectivity returns
+* Recovery after app restart preserves the held work
+
+Connectivity must be simulated through Endura’s environment abstraction, not by relying on real simulator network toggles alone.
+
+##### Scenario 9: Offline Mid-Stage Failure
+
+Model a workflow that starts online, loses connectivity during a stage, and later resumes.
+
+The scenario must verify:
+
+* The in-flight stage fails, holds, or retries according to explicit policy
+* Prior successful stages are not lost
+* The failed stage is retried after connectivity returns
+* The workflow does not restart from stage one unless that is the intended behavior
+* No duplicate downstream side effects occur
+
+##### Scenario 10: Foreground and Background Collision
+
+Model the production case where foreground app processing and background execution overlap.
+
+The scenario must verify:
+
+* Foreground engine claims a long-running task
+* Background wake occurs while the task is active
+* The background engine does not reset the active task
+* The same task is not claimed twice
+* Attempts are not falsely exhausted
+* The workflow completes once from the app’s perspective
+* No duplicate fake-server side effect occurs
+
+This scenario gates any production use of Endura background execution.
+
+##### Scenario 11: Stale Success and Stale Failure
+
+Model the timeout class already handled in the current driver app.
+
+The scenario must verify:
+
+* A handler times out but continues running
+* A retry starts or the workflow advances
+* The old handler later resolves successfully or throws
+* The late result cannot overwrite newer execution state
+* A synced or advanced workflow cannot be downgraded to failed by stale work
+* Logs clearly show the stale result was ignored
+
+This is required before Endura can safely run photo-like or native-module-heavy workflows.
+
+##### Scenario 12: App Upgrade With Pending Work
+
+Model an app upgrade while a workflow is pending or failed.
+
+The scenario must verify:
+
+* A persisted workflow references an activity name from version N
+* Version N+1 renames, removes, inserts, or reorders activities
+* Unknown activity names are held for inspection, not immediately dead-lettered
+* Compatible activity changes continue safely
+* Incompatible changes produce a visible, recoverable state
+* Recovery does not create a job with an undefined worker
+
+This scenario is required because the current recovery code has explicit guards for unmapped stages from renamed or removed workers.
+
+##### Scenario 13: Mobility Run Scoped Recovery
+
+Model mobility-related workflows such as:
+
+* `mobilityRunSync.pipeline`
+* `mobilityStopSync.pipeline`
+* `mobilityVehicleSync.pipeline`
+* `serviceOrderSync.pipeline`
+* mobile-service photo workflows
+
+The scenario must verify:
+
+* Failed work can be scoped by mobility run
+* Failed work can be scoped by service order where relevant
+* Move-based and run-based recovery do not interfere with each other
+* Force Retry works for a run-scoped failure
+* Inspection APIs can power a per-run recovery UI
+
+This is required before Endura backs mobile-service workflows.
+
+##### Scenario 14: Backlog Drain With Priority
+
+Model a large backlog after offline usage.
+
+The scenario must verify:
+
+* Many workflows are queued while offline
+* Different workflows have realistic priorities
+* When connectivity returns, work drains in expected priority order
+* FIFO order is preserved within a priority
+* Lower-priority work is not starved forever
+* The app remains responsive enough for mobile use
+* The result is inspectable after completion
+
+Priority values should be extracted from current worker `jobOptions`.
+
+#### Scenario Result Contract
+
+Each Expo scenario must return a structured result.
+
+```ts
+type ScenarioResult = {
+  scenarioId: string;
+  name: string;
+  status: 'passed' | 'failed';
+  startedAt: string;
+  completedAt?: string;
+  steps: Array<{
+    name: string;
+    status: 'passed' | 'failed' | 'skipped';
+    detail?: string;
+  }>;
+  assertions: Array<{
+    name: string;
+    passed: boolean;
+    expected?: unknown;
+    actual?: unknown;
+  }>;
+  executionSnapshot?: unknown;
+  taskSnapshot?: unknown;
+  deadLetterSnapshot?: unknown;
+  fakeServerSnapshot?: unknown;
+  logs: string[];
+};
+```
+
+A scenario passes only when all assertions pass.
+
+A workflow reaching `completed` is not enough if it violated ordering, dedupe, recovery, idempotency, or inspection expectations.
+
+#### Required Fake Server
+
+The Expo test app must include a fake server or fake side-effect recorder.
+
+It must support:
+
+* Successful mutation
+* Transient failure
+* Permanent server refusal
+* Slow response
+* Hung response
+* Duplicate idempotency key
+* Late success
+* Late failure
+* Connectivity unavailable
+
+The fake server should record logical business effects, not just function calls. For example:
+
+* One uploaded photo
+* One move status update
+* One submitted outcome
+* One merged workflow-data update
+* One processed offer bundle
+
+This is how the scenario suite proves Endura’s at-least-once execution model does not become duplicate business behavior.
+
+#### Required Expo Harness Capabilities
+
+The Expo test app must provide:
+
+* Scenario list
+* Scenario detail screen
+* Reset scenario
+* Run scenario
+* Run all scenarios
+* Persisted SQLite state viewer
+* Execution viewer
+* Task viewer
+* Dead-letter viewer
+* Connectivity toggle
+* Background wake simulation
+* App restart or engine restart simulation
+* Failure injection controls
+* Fake server viewer
+* Export scenario report as JSON
+
+#### Success Gates
+
+Phase 4 is complete only when:
+
+1. The pipeline inventory is complete.
+2. Every `Must Match` pipeline has a mapped Endura scenario or an explicitly documented replacement decision.
+3. All required scenario categories above are implemented.
+4. All scenarios pass in the iOS simulator.
+5. All scenarios pass in the Android simulator.
+6. Photo pipeline parity passes.
+7. Outcome draft sync parity passes.
+8. Outcome submit parity passes.
+9. Move sync permanent failure and force retry parity pass.
+10. Offer bundle per-entity dedupe parity passes.
+11. Offline hold and offline mid-stage scenarios pass.
+12. Foreground/background collision passes before background execution is enabled.
+13. App upgrade with pending work passes.
+14. Recovery age gate and non-recoverable workflow behavior pass.
+15. The fake server shows no unintended duplicate business effects.
+16. Failures from this phase are added to the issue catalog with severity.
+
+#### Issue Catalog Additions
+
+Any mismatch discovered in Phase 4 must be added to the issue catalog.
+
+Use this format:
+
+| ID | Severity | Area | Current Driver App Behavior | Endura Behavior | Production Risk | Required Fix | Scenario |
+| -- | -------- | ---- | --------------------------- | --------------- | --------------- | ------------ | -------- |
+
+Severity rules:
+
+* `Critical`: Endura cannot safely replace current production behavior
+* `High`: Endura can replace it only with a risky workaround
+* `Medium`: Acceptable for a narrow pilot but not broad rollout
+* `Low`: Cleanup, documentation, or non-blocking parity gap
+
+#### Adoption Rule
+
+Endura may not replace the current driver app pipeline layer until Phase 4 passes.
+
+Phase 1 through Phase 3 prove the Endura engine is internally stronger.
+
+Phase 4 proves Endura is actually fit to replace the behavior HopDrive drivers rely on in production.
+
+The required proof is:
+
+> Production driver-app pipeline behaviors have been extracted from `driver-app-3`, translated into deterministic Expo mobile scenarios, and all required scenarios pass on iOS and Android against the real Endura SQLite persistence layer.
+
 ---
 
 ## Adoption Recommendation

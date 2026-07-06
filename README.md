@@ -345,6 +345,31 @@ execute: async (ctx) => {
 }
 ```
 
+**DO: Keep activity outputs small — return references, not payloads**
+
+Every activity's return value merges into `execution.state`, and the
+whole state is rewritten to storage on **every** subsequent advance. A
+photo-sized output doesn't cost you once — it taxes every remaining step
+of the run and every crash-recovery read.
+
+```typescript
+// Bad: the image rides along in workflow state forever
+execute: async (ctx) => {
+  const jpeg = await camera.capture();
+  return { photo: jpeg.base64 };   // megabytes, rewritten each advance
+}
+
+// Good: persist the blob yourself, chain the reference
+execute: async (ctx) => {
+  const path = await savePhotoToDisk(await camera.capture());
+  return { photoPath: path };      // bytes
+}
+```
+
+The engine warns (never throws) when a single result or the merged
+state exceeds `stateSizeWarnBytes` (default 64 KB, configurable on
+`WorkflowEngineConfig`).
+
 ### The Checkpoint Test
 
 Ask yourself: "If this activity crashes at any line and restarts from the beginning, what happens?"
@@ -2142,6 +2167,13 @@ MIT License — see [LICENSE](./LICENSE) for details.
 ## Contributing
 
 Contributions are welcome! Please read our [Contributing Guide](./CONTRIBUTING.md) for details on our code of conduct and the process for submitting pull requests.
+
+### Consuming from a git checkout
+
+`dist/` is gitignored — endura is distributed built via npm only. If
+you file-link or install this repo from a checkout (the local-link E2E
+workflow), run `npm run build` first or the package entries will
+resolve to nothing.
 
 ---
 

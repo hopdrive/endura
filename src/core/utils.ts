@@ -52,21 +52,40 @@ export function generateId(): string {
 }
 
 /**
+ * Jitter strategy for retry backoff.
+ * - 'none': pure exponential
+ * - 'equal': uniform in [delay/2, delay] — keeps a floor while spreading retries
+ * - 'full': uniform in [0, delay]
+ */
+export type JitterMode = 'none' | 'equal' | 'full';
+
+/**
  * Calculate backoff delay for a retry attempt.
+ *
+ * The maximumInterval cap applies BEFORE jitter, so a jittered delay
+ * never exceeds the cap.
  */
 export function calculateBackoffDelay(
   attempt: number,
   initialInterval: number,
   backoffCoefficient: number,
-  maximumInterval?: number
+  maximumInterval?: number,
+  options?: { jitter?: JitterMode; random?: () => number }
 ): number {
   // Attempt is 1-based, so for attempt 1, we use initialInterval
   // For attempt 2, we use initialInterval * coefficient
   // For attempt 3, we use initialInterval * coefficient^2
-  const delay = initialInterval * Math.pow(backoffCoefficient, attempt - 1);
+  let delay = initialInterval * Math.pow(backoffCoefficient, attempt - 1);
 
   if (maximumInterval !== undefined) {
-    return Math.min(delay, maximumInterval);
+    delay = Math.min(delay, maximumInterval);
+  }
+
+  const jitter = options?.jitter ?? 'none';
+  if (jitter !== 'none') {
+    const random = options?.random ?? Math.random;
+    delay = jitter === 'equal' ? delay / 2 + random() * (delay / 2) : random() * delay;
+    return Math.round(delay);
   }
   return delay;
 }
@@ -94,6 +113,17 @@ export function mergeState(
     return base;
   }
   return { ...base, ...additions };
+}
+
+/**
+ * Approximate serialized size of a value: the length of its JSON string
+ * (exact bytes for ASCII payloads, an underestimate for multi-byte
+ * characters). Cheap enough to run per advance; used for the state-size
+ * guardrails, not for accounting.
+ */
+export function approxJsonBytes(value: unknown): number {
+  const json = JSON.stringify(value);
+  return json === undefined ? 0 : json.length;
 }
 
 /**

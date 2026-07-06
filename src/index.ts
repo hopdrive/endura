@@ -5,12 +5,12 @@
  * Your tasks will endure.
  *
  * Import paths:
- *   'endura'                      - Core engine, types, definitions, conditions, mocks
+ *   'endura'                      - Core engine, types, definitions, conditions
  *   'endura/storage/sqlite'       - SQLiteStorage, ExpoSqliteDriver
  *   'endura/storage/memory'       - InMemoryStorage
  *   'endura/react'                - React hooks (useExecution, useWorkflowStarter, etc.)
  *   'endura/environmental/expo'   - Expo platform helpers (ExpoWorkflowClient, etc.)
- *   'endura/testing'              - Test utilities (BetterSqlite3Driver)
+ *   'endura/testing'              - Test utilities (mocks, BetterSqlite3Driver)
  */
 
 export * from './core';

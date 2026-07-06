@@ -59,29 +59,27 @@ export {
 // Definitions
 export { defineActivity, defineWorkflow, DefineActivityOptions, DefineWorkflowOptions } from './definitions';
 
+// Typed step chaining
+export { chain, StepChain } from './chain';
+
 // Conditions
 export { conditions, always, whenConnected, whenDisconnected, afterDelay, all, any, not } from './conditions';
 
 // Engine
 export { WorkflowEngine } from './engine';
 
-// Mocks
-export {
-  MockClock,
-  MockScheduler,
-  MockEnvironment,
-  MockEnvironmentState,
-  RealClock,
-  RealScheduler,
-  StubEnvironment,
-} from './mocks';
+// Default runtime implementations for Node/web consumers. Test doubles
+// (MockClock, MockScheduler, MockEnvironment) moved to 'endura/testing'.
+export { RealClock, RealScheduler, StubEnvironment } from './defaults';
 
 // Utils
 export {
   generateId,
   setIdGenerator,
   calculateBackoffDelay,
+  JitterMode,
   mergeState,
+  approxJsonBytes,
   createAbortController,
   silentLogger,
   consoleLogger,

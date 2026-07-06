@@ -248,6 +248,13 @@ export interface RetryPolicy {
   backoffCoefficient?: number;
   /** Cap on retry delay (default: none) */
   maximumInterval?: number;
+  /**
+   * Jitter applied to the computed delay so a burst of failures does
+   * not reschedule every task onto the same instant.
+   * 'equal' = uniform in [delay/2, delay]; 'full' = uniform in [0, delay].
+   * @default 'equal'
+   */
+  jitter?: 'none' | 'equal' | 'full';
 }
 
 /**
@@ -430,6 +437,24 @@ export interface WorkflowEngineConfig {
    * @default 60000
    */
   leaseDurationMs?: number;
+  /**
+   * Serialized-size threshold (approximate bytes) above which the engine
+   * warns about oversized activity results and workflow state.
+   *
+   * Activity outputs merge into `execution.state`, which is rewritten on
+   * EVERY subsequent advance — a photo-sized output taxes the rest of
+   * the run. Keep outputs small: store a reference (file path, row id),
+   * not the payload.
+   * @default 65536
+   */
+  stateSizeWarnBytes?: number;
+  /**
+   * Random source for retry-backoff jitter. Inject a fixed value in
+   * tests for deterministic scheduling (`() => 1` reproduces the
+   * un-jittered upper bound).
+   * @default Math.random
+   */
+  random?: () => number;
 }
 
 // ============================================================================
@@ -521,7 +546,12 @@ export interface Storage {
   deleteActivityTasksForExecution(runId: string): Promise<void>;
 
   // Queue Operations
-  getPendingActivityTasks(options?: { limit?: number; now?: number }): Promise<ActivityTask[]>;
+  /**
+   * Due pending tasks, priority-ordered. `now` is required: the caller
+   * owns time (the engine passes its injected Clock); storage must
+   * never fall back to Date.now().
+   */
+  getPendingActivityTasks(options: { limit?: number; now: number }): Promise<ActivityTask[]>;
   claimActivityTask(
     taskId: string,
     now: number,

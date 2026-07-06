@@ -488,9 +488,8 @@ export class SQLiteStorage implements Storage {
   // Queue Operations
   // ============================================================================
 
-  async getPendingActivityTasks(options?: { limit?: number; now?: number }): Promise<ActivityTask[]> {
-    const now = options?.now ?? Date.now();
-    const limit = options?.limit ?? 100;
+  async getPendingActivityTasks(options: { limit?: number; now: number }): Promise<ActivityTask[]> {
+    const { now, limit = 100 } = options;
 
     const rows = await this.driver.query(
       `SELECT * FROM activity_tasks

@@ -22,6 +22,7 @@ async function createEngine(storage: InMemoryStorage, clock: MockClock): Promise
     scheduler: new MockScheduler(clock),
     environment: new MockEnvironment({ isConnected: true, batteryLevel: 1.0 }),
     leaseDurationMs: 60000,
+    random: () => 1, // pin jitter to its upper bound for exact timing
   });
 }
 

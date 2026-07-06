@@ -101,11 +101,21 @@ CREATE INDEX IF NOT EXISTS idx_dead_letters_failed_at ON dead_letters(failed_at)
 
 /**
  * SQL statements split into individual statements for execution.
+ *
+ * Comment-only lines are stripped so each statement begins with its SQL
+ * keyword — the drivers route DDL by startsWith('CREATE'), which never
+ * matched while statements led with `-- comment` lines (L3).
  */
 export function getSchemaStatements(): string[] {
   return SCHEMA_SQL
     .split(';')
-    .map(stmt => stmt.trim())
+    .map(stmt =>
+      stmt
+        .split('\n')
+        .filter(line => !line.trim().startsWith('--'))
+        .join('\n')
+        .trim()
+    )
     .filter(stmt => stmt.length > 0)
     .map(stmt => stmt + ';');
 }

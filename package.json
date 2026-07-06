@@ -4,6 +4,7 @@
   "description": "Durable execution for React Native. Build offline-first workflows that survive app crashes, network failures, and device restarts.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "sideEffects": false,
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -57,7 +58,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
     "lint": "eslint src tests --ext .ts,.tsx --max-warnings 0",
     "clean": "rm -rf dist",
     "prepare": "husky"

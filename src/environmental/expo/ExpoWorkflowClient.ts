@@ -5,7 +5,7 @@
  */
 
 import { WorkflowEngine } from '../../core/engine';
-import { Storage } from '../../core/types';
+import { Storage, Logger } from '../../core/types';
 import { setIdGenerator } from '../../core/utils';
 import { ExpoClock } from './ExpoClock';
 import { ExpoScheduler } from './ExpoScheduler';
@@ -69,6 +69,19 @@ export interface ExpoWorkflowClientOptions {
    * @default 60000
    */
   leaseDurationMs?: number;
+
+  /**
+   * Logger for engine observability (state-size warnings, recovery,
+   * version skew, …). Silent when omitted.
+   */
+  logger?: Logger;
+
+  /**
+   * Size threshold for oversized result/state warnings.
+   * See WorkflowEngineConfig.stateSizeWarnBytes.
+   * @default 65536
+   */
+  stateSizeWarnBytes?: number;
 }
 
 /**
@@ -141,6 +154,8 @@ export class ExpoWorkflowClient {
       environment,
       onEvent: options.onEvent,
       leaseDurationMs: options.leaseDurationMs,
+      logger: options.logger,
+      stateSizeWarnBytes: options.stateSizeWarnBytes,
     });
 
     return new ExpoWorkflowClient(engine, storage, environment);
@@ -234,5 +249,9 @@ export class ExpoWorkflowClient {
 
   get purgeDeadLetters() {
     return this.engine.purgeDeadLetters.bind(this.engine);
+  }
+
+  get subscribeToChanges() {
+    return this.engine.subscribeToChanges.bind(this.engine);
   }
 }
