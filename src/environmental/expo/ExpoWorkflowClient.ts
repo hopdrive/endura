@@ -18,7 +18,7 @@ import { ExpoEnvironment, ExpoEnvironmentOptions } from './ExpoEnvironment';
  */
 function wireExpoCrypto(): void {
   try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    // Dynamic require: expo-crypto is an optional peer dependency
     const cryptoModule = require('expo-crypto') as { randomUUID?: () => string };
     if (typeof cryptoModule.randomUUID === 'function') {
       setIdGenerator(() => cryptoModule.randomUUID!());

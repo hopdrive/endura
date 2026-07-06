@@ -10,6 +10,7 @@ import {
   Logger,
   Workflow,
   Activity,
+  AnyActivity,
   WorkflowExecution,
   ActivityTask,
   DeadLetterRecord,
@@ -224,9 +225,10 @@ export class WorkflowEngine {
     }
     this.workflows.set(workflow.name, workflow);
 
-    // Also register all activities from this workflow
+    // Also register all activities from this workflow. The engine
+    // erases per-activity input/output generics internally.
     for (const activity of workflow.activities) {
-      this.activities.set(activity.name, activity);
+      this.activities.set(activity.name, activity as Activity);
     }
 
     this.logger.debug('Registered workflow', {
@@ -350,7 +352,7 @@ export class WorkflowEngine {
    */
   private async scheduleActivityTask(
     execution: WorkflowExecution,
-    activity: Activity,
+    activity: AnyActivity,
     input: Record<string, unknown>
   ): Promise<ActivityTask> {
     const now = this.clock.now();
