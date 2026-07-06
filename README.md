@@ -2168,6 +2168,13 @@ MIT License — see [LICENSE](./LICENSE) for details.
 
 Contributions are welcome! Please read our [Contributing Guide](./CONTRIBUTING.md) for details on our code of conduct and the process for submitting pull requests.
 
+### Consuming from a git checkout
+
+`dist/` is gitignored — endura is distributed built via npm only. If
+you file-link or install this repo from a checkout (the local-link E2E
+workflow), run `npm run build` first or the package entries will
+resolve to nothing.
+
 ---
 
 ## Changelog
