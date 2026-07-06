@@ -128,5 +128,5 @@ export async function inspectEngine(client: ParityClient): Promise<EngineInspect
   const counts = Object.fromEntries(PHASE_ORDER.map(phase => [phase, 0])) as Record<JobPhase, number>;
   for (const job of jobs) counts[job.phase] += 1;
 
-  return { jobs, counts, logs: client.parityLogs.slice(-20) };
+  return { jobs, counts, logs: client.parityLogs.slice(-40) };
 }

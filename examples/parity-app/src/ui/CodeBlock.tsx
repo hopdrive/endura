@@ -1,8 +1,8 @@
 /**
- * Monospace code display with a deliberately tiny syntax highlighter
- * (keywords / strings / comments — enough to make samples readable
- * without a highlighting dependency), plus a file-tree renderer for
- * "where this code lives" structures.
+ * Code display with a deliberately tiny syntax highlighter (keywords /
+ * strings / comments — enough to make samples readable without a
+ * highlighting dependency). Light well styling to match the app's
+ * iOS design language.
  */
 
 import { ReactNode } from 'react';
@@ -84,46 +84,18 @@ export function CodeBlock({ code, title }: { code: string; title?: string }) {
   );
 }
 
-/**
- * File tree: lines like "src/workflows/photoUpload.ts  <- the pipeline".
- * Paths render in mono, annotations (after two+ spaces) in muted text.
- */
-export function FileTree({ tree }: { tree: string }) {
-  const lines = tree.replace(/\n+$/, '').split('\n');
-  return (
-    <View style={styles.block}>
-      {lines.map((line, i) => {
-        const match = /^(\s*\S+)(\s{2,})(.*)$/.exec(line);
-        return (
-          <Text key={i} style={type.code}>
-            {match ? (
-              <>
-                <Text style={{ color: colors.tertiaryAccentBright }}>{match[1]}</Text>
-                <Text>{match[2]}</Text>
-                <Text style={{ color: colors.codeComment }}>{match[3]}</Text>
-              </>
-            ) : (
-              <Text style={{ color: colors.tertiaryAccentBright }}>{line}</Text>
-            )}
-          </Text>
-        );
-      })}
-    </View>
-  );
-}
-
 const styles = StyleSheet.create({
   block: {
-    backgroundColor: colors.codeBg,
+    backgroundColor: colors.well,
     borderRadius: radius.md,
     padding: spacing.sm,
     marginVertical: spacing.xs,
   },
   title: {
-    fontSize: 11,
+    fontSize: 12,
     fontWeight: '600',
-    color: colors.textMuted,
-    letterSpacing: 0.8,
+    color: colors.secondaryLabel,
+    letterSpacing: 0.4,
     textTransform: 'uppercase',
     marginBottom: spacing.xs,
   },

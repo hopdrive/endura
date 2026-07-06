@@ -1,81 +1,56 @@
 /**
- * The Endura engine manager — a bottom panel available on every tab.
+ * The Endura engine inspector.
  *
- * Collapsed, it is the fixed-geometry instrument strip: live source,
- * connectivity, four KPI counters, and a ticker narrating the last
- * engine event. Swipe up (or tap) and it expands into the full
- * manager, in the spirit of driver-app-3's debug queue screens:
- * every job the engine persists, grouped by stage, with a tap-through
- * detail view (payload, accumulated pipeline state, metadata, task
- * lease, full error history) and actions — force retry, cancel, and a
- * connectivity toggle for the live engine.
+ * Docked at the bottom of every screen is a compact status bar with
+ * live queue counters. Tapping it presents a NATIVE sheet (Modal with
+ * pageSheet presentation — real iOS rounded corners, dimmed underlay,
+ * swipe-down to dismiss) containing the full inspector:
+ *
+ *   Status — engine state, real radio connectivity, the on-duty app
+ *            state switch, delivery endpoint, and reset.
+ *   Setup  — every registered workflow and its activities (retry
+ *            policy, priority, timeout, gating), read from the live
+ *            definitions.
+ *   Jobs   — every job the engine persists, grouped by phase, with a
+ *            drill-in detail view (payload, pipeline trail, attempt
+ *            history) and retry / cancel actions.
+ *   Log    — the engine narrating itself.
+ *   Tests  — the 15-scenario parity suite, runnable on this device.
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useState } from 'react';
 import {
-  Animated,
-  Dimensions,
-  PanResponder,
+  Alert,
+  Modal,
   Pressable,
   ScrollView,
   StyleSheet,
+  Switch,
   Text,
+  TextInput,
   View,
 } from 'react-native';
 import { ActivityTask } from 'endura';
-import { ParityClient } from '../harness/expoPlatform';
-import { EngineInspection, inspectEngine, JobPhase, JobRecord } from '../harness/engineInspection';
-import { colors, mono, radius, spacing } from './theme';
+import { DemoEngineSession, DEFAULT_ENDPOINT } from '../harness/demoEngine';
+import { EngineInspection, JobPhase, JobRecord } from '../harness/engineInspection';
+import { runScenario } from '../harness/runner';
+import { expoPlatform } from '../harness/expoPlatform';
+import { scenarios } from '../scenarios';
+import { Button, Card, ListRow, Pill, SectionHeader, SegmentedTabs } from './primitives';
+import { colors, mono, radius, spacing, type } from './theme';
 
-export interface EngineStatus {
-  source: 'scenario' | 'playground' | 'field';
-  label: string;
-  online: boolean;
-  runningExecutions: number;
-  pendingTasks: number;
-  activeTasks: number;
-  deadLetters: number;
-  effects: number;
-  lastEvent: string | null;
-}
-
-/** Connectivity control for the live engine, provided per source. */
-export interface ConnectivityControl {
-  /** e.g. "GO OFFLINE", "FORCE OFFLINE (SOFTWARE)". */
-  toggleLabel: string;
-  onToggle: () => void;
-  /** Extra context, e.g. "radio: online". */
-  note?: string;
-}
-
-const COLLAPSED_HEIGHT = 104;
-const EXPANDED_HEIGHT = Math.round(Dimensions.get('window').height * 0.82);
-
-const SOURCE_STYLE = {
-  scenario: { color: colors.info, label: 'SCENARIO RUNNING' },
-  field: { color: colors.successBright, label: 'FIELD TEST LIVE' },
-  playground: { color: colors.tertiaryAccentBright, label: 'PLAYGROUND LIVE' },
-} as const;
-
-const PHASE_META: Record<JobPhase, { title: string; glyph: string; color: string }> = {
-  active: { title: 'Active — in flight now', glyph: '▶', color: colors.info },
-  backoff: { title: 'Retry backoff', glyph: '↻', color: colors.info },
-  held: { title: 'Held (offline)', glyph: '‖', color: colors.warning },
-  waiting: { title: 'Waiting', glyph: '·', color: colors.textSecondary },
-  dead: { title: 'Dead letters', glyph: '✗', color: colors.errorBright },
-  failed: { title: 'Failed', glyph: '✗', color: colors.errorBright },
-  cancelled: { title: 'Cancelled', glyph: '⊘', color: colors.textMuted },
-  completed: { title: 'Completed', glyph: '✓', color: colors.successBright },
+const PHASE_META: Record<JobPhase, { title: string; color: string; soft: string }> = {
+  active: { title: 'Running Now', color: colors.tint, soft: colors.tintSoft },
+  backoff: { title: 'Retrying', color: colors.teal, soft: colors.tealSoft },
+  held: { title: 'Held by a Gate', color: colors.orange, soft: colors.orangeSoft },
+  waiting: { title: 'Waiting', color: colors.gray, soft: colors.graySoft },
+  dead: { title: 'Dead Letters', color: colors.red, soft: colors.redSoft },
+  failed: { title: 'Failed', color: colors.red, soft: colors.redSoft },
+  cancelled: { title: 'Cancelled', color: colors.gray, soft: colors.graySoft },
+  completed: { title: 'Completed', color: colors.green, soft: colors.greenSoft },
 };
 
 const PHASE_SECTIONS: JobPhase[] = ['active', 'backoff', 'held', 'waiting', 'dead', 'failed', 'cancelled', 'completed'];
-
-function tickerText(rawLine: string): string {
-  return rawLine
-    .replace(/^(debug|info|warn|error)\s+/, '')
-    .replace(/\s*\{.*$/, '')
-    .trim();
-}
 
 function timeOf(timestamp: number | undefined): string {
   return timestamp === undefined ? '—' : new Date(timestamp).toTimeString().slice(0, 8);
@@ -87,409 +62,113 @@ function dueIn(scheduledFor: number | undefined): string {
   return delta <= 0 ? 'now' : `in ${(delta / 1000).toFixed(0)}s`;
 }
 
+type PanelTab = 'status' | 'setup' | 'jobs' | 'log' | 'tests';
+
 export function EnginePanel({
-  status,
-  getClient,
-  connectivity,
-  onJumpToSource,
+  session,
+  inspection,
+  onDutyChanged,
 }: {
-  status: EngineStatus | null;
-  getClient: () => ParityClient | null;
-  connectivity?: ConnectivityControl;
-  onJumpToSource?: () => void;
+  session: DemoEngineSession;
+  inspection: EngineInspection | null;
+  /** Lets the app re-render anything else showing duty state. */
+  onDutyChanged?: () => void;
 }) {
-  const [expanded, setExpanded] = useState(false);
-  const [inspection, setInspection] = useState<EngineInspection | null>(null);
+  const [open, setOpen] = useState(false);
+  const [tab, setTab] = useState<PanelTab>('status');
   const [selectedRun, setSelectedRun] = useState<string | null>(null);
-  const [actionError, setActionError] = useState<string | null>(null);
-  const heightAnim = useRef(new Animated.Value(COLLAPSED_HEIGHT)).current;
-  const expandedRef = useRef(false);
-  const pulse = useRef(new Animated.Value(1)).current;
-  const lastEvent = status?.lastEvent ?? null;
 
-  useEffect(() => {
-    if (lastEvent === null) return;
-    pulse.setValue(0.15);
-    Animated.timing(pulse, { toValue: 1, duration: 500, useNativeDriver: false }).start();
-  }, [lastEvent, pulse]);
+  const counts = inspection?.counts;
+  const queued = counts ? counts.waiting + counts.held + counts.backoff : 0;
+  const running = counts?.active ?? 0;
+  const delivered = counts?.completed ?? 0;
+  const dead = counts ? counts.dead + counts.failed : 0;
+  const online = session.isOnline();
+  const onDuty = session.isOnDuty();
 
-  const setPanel = useCallback(
-    (open: boolean) => {
-      expandedRef.current = open;
-      setExpanded(open);
-      if (!open) setSelectedRun(null);
-      Animated.timing(heightAnim, {
-        toValue: open ? EXPANDED_HEIGHT : COLLAPSED_HEIGHT,
-        duration: 260,
-        useNativeDriver: false,
-      }).start();
-    },
-    [heightAnim]
-  );
-
-  const panResponder = useRef(
-    PanResponder.create({
-      onMoveShouldSetPanResponder: (_event, gesture) => Math.abs(gesture.dy) > 14,
-      onPanResponderRelease: (_event, gesture) => {
-        if (gesture.dy < -14 && !expandedRef.current) setPanel(true);
-        else if (gesture.dy > 14 && expandedRef.current) setPanel(false);
-      },
-    })
-  ).current;
-
-  // Deep inspection poll, only while the manager is open.
-  useEffect(() => {
-    if (!expanded) return;
-    let cancelled = false;
-    const poll = async () => {
-      try {
-        const client = getClient();
-        if (!client) {
-          if (!cancelled) setInspection(null);
-          return;
-        }
-        const next = await inspectEngine(client);
-        if (!cancelled) setInspection(next);
-      } catch {
-        // Client mid-teardown — next poll reads consistent state.
-      }
-    };
-    void poll();
-    const interval = setInterval(() => void poll(), 1000);
-    return () => {
-      cancelled = true;
-      clearInterval(interval);
-    };
-  }, [expanded, getClient, status?.source]);
-
-  const runAction = useCallback(
-    (fn: (client: ParityClient) => Promise<unknown>) => () => {
-      void (async () => {
-        setActionError(null);
-        try {
-          const client = getClient();
-          if (client) await fn(client);
-        } catch (err) {
-          setActionError(String(err));
-        }
-      })();
-    },
-    [getClient]
-  );
-
-  const source = status ? SOURCE_STYLE[status.source] : { color: colors.textMuted, label: 'ENGINE IDLE' };
-  const queued = (status?.pendingTasks ?? 0) + (status?.activeTasks ?? 0);
-  const deadLetters = status?.deadLetters ?? 0;
   const selectedJob = selectedRun ? inspection?.jobs.find(job => job.runId === selectedRun) : undefined;
 
   return (
-    <Animated.View style={[styles.panel, { height: heightAnim }]} {...panResponder.panHandlers}>
-      <Pressable onPress={() => setPanel(!expanded)} testID="engine-status-bar">
-        <View style={styles.handle} />
-        <View style={styles.headerRow}>
-          <View style={styles.stateBlock}>
-            <Animated.Text style={[styles.dot, { color: source.color, opacity: status ? pulse : 1 }]}>●</Animated.Text>
-            <Text style={[styles.stateText, { color: source.color }]} numberOfLines={1}>
-              {source.label}
-            </Text>
+    <>
+      <Pressable testID="engine-status-bar" style={styles.dock} onPress={() => setOpen(true)}>
+        <View style={styles.dockHeader}>
+          <View style={styles.dockTitleRow}>
+            <View style={[styles.dot, { backgroundColor: session.isOpen() ? colors.green : colors.gray }]} />
+            <Text style={type.headline}>Endura Engine</Text>
           </View>
-          <Text
-            style={[
-              styles.onlineText,
-              { color: status ? (status.online ? colors.successBright : colors.warning) : colors.textMuted },
-            ]}
-            numberOfLines={1}
-          >
-            {status ? (status.online ? '⇡ ONLINE' : '⇣ OFFLINE') : '—'}
-            {'  '}
-            <Text style={{ color: colors.textMuted }}>{expanded ? '▼' : '▲'}</Text>
-          </Text>
+          <View style={styles.dockPills}>
+            <Pill
+              label={online ? 'Online' : 'Offline'}
+              color={online ? colors.green : colors.orange}
+              softColor={online ? colors.greenSoft : colors.orangeSoft}
+            />
+            {!onDuty ? <Pill label="Off Duty" color={colors.gray} softColor={colors.graySoft} /> : null}
+            <Text style={styles.dockChevron}>⌃</Text>
+          </View>
         </View>
-
         <View style={styles.kpiRow}>
-          <Kpi value={queued} label="QUEUED" active={queued > 0} />
-          <Kpi value={status?.runningExecutions ?? 0} label="RUNNING" active={(status?.runningExecutions ?? 0) > 0} />
-          <Kpi value={deadLetters} label="DEAD" active={deadLetters > 0} valueColor={deadLetters > 0 ? colors.warning : undefined} />
-          <Kpi
-            value={status?.effects ?? 0}
-            label="DELIVERED"
-            active={(status?.effects ?? 0) > 0}
-            valueColor={(status?.effects ?? 0) > 0 ? colors.successBright : undefined}
-          />
+          <Kpi value={queued} label="In Queue" tone={queued > 0 ? colors.orange : undefined} />
+          <Kpi value={running} label="Running" tone={running > 0 ? colors.tint : undefined} />
+          <Kpi value={delivered} label="Delivered" tone={delivered > 0 ? colors.green : undefined} />
+          <Kpi value={dead} label="Dead" tone={dead > 0 ? colors.red : undefined} />
         </View>
-
-        {!expanded ? (
-          <Text style={styles.ticker} numberOfLines={1}>
-            {status
-              ? status.lastEvent
-                ? tickerText(status.lastEvent)
-                : `engine up — ${status.label}`
-              : 'run a lab scenario, start a field test, or open the playground — swipe up to manage'}
-          </Text>
-        ) : null}
       </Pressable>
 
-      {expanded ? (
-        <View style={styles.managerBody}>
-          <View style={styles.controlsRow}>
-            {connectivity ? (
-              <Pressable testID="panel-toggle-online" style={styles.controlButton} onPress={connectivity.onToggle}>
-                <Text style={styles.controlButtonText}>{connectivity.toggleLabel}</Text>
-              </Pressable>
-            ) : (
-              <Text style={styles.controlNote}>
-                {status ? 'connectivity is scripted by the running scenario' : 'no live engine'}
-              </Text>
-            )}
-            {onJumpToSource && status ? (
-              <Pressable testID="panel-jump-source" style={styles.controlGhost} onPress={onJumpToSource}>
-                <Text style={styles.controlGhostText}>OPEN TAB →</Text>
-              </Pressable>
-            ) : null}
+      <Modal
+        visible={open}
+        animationType="slide"
+        presentationStyle="pageSheet"
+        onRequestClose={() => setOpen(false)}
+      >
+        <View style={styles.sheet}>
+          <View style={styles.sheetHeader}>
+            <View style={styles.sheetHeaderSide} />
+            <Text style={type.headline}>Endura Engine</Text>
+            <Pressable testID="panel-done" style={styles.sheetHeaderSide} onPress={() => setOpen(false)}>
+              <Text style={styles.doneText}>Done</Text>
+            </Pressable>
           </View>
-          {connectivity?.note ? <Text style={styles.controlNoteSmall}>{connectivity.note}</Text> : null}
-          {actionError ? <Text style={styles.actionError}>{actionError}</Text> : null}
+          <View style={styles.tabsWrap}>
+            <SegmentedTabs<PanelTab>
+              tabs={[
+                { key: 'status', label: 'Status' },
+                { key: 'setup', label: 'Setup' },
+                { key: 'jobs', label: 'Jobs' },
+                { key: 'log', label: 'Log' },
+                { key: 'tests', label: 'Tests' },
+              ]}
+              active={tab}
+              onChange={next => {
+                setTab(next);
+                setSelectedRun(null);
+              }}
+              testIDPrefix="panel-tab"
+            />
+          </View>
 
-          <ScrollView style={styles.managerScroll} contentContainerStyle={styles.managerContent}>
-            {selectedJob ? (
-              <JobDetail
-                job={selectedJob}
-                onBack={() => setSelectedRun(null)}
-                onRetry={
-                  selectedJob.deadLetter
-                    ? runAction(client => client.engine.retryFromDeadLetter(selectedJob.deadLetter!.id))
-                    : undefined
-                }
-                onCancel={
-                  selectedJob.execution.status === 'running'
-                    ? runAction(client => client.engine.cancelExecution(selectedJob.runId))
-                    : undefined
-                }
-              />
-            ) : (
-              <JobList inspection={inspection} onSelect={setSelectedRun} />
-            )}
+          <ScrollView style={styles.sheetScroll} contentContainerStyle={styles.sheetContent}>
+            {tab === 'status' ? <StatusTab session={session} inspection={inspection} onDutyChanged={onDutyChanged} /> : null}
+            {tab === 'setup' ? <SetupTab session={session} /> : null}
+            {tab === 'jobs' ? (
+              selectedJob ? (
+                <JobDetail job={selectedJob} session={session} onBack={() => setSelectedRun(null)} />
+              ) : (
+                <JobsTab inspection={inspection} onSelect={setSelectedRun} />
+              )
+            ) : null}
+            {tab === 'log' ? <LogTab inspection={inspection} /> : null}
+            {tab === 'tests' ? <TestsTab /> : null}
           </ScrollView>
         </View>
-      ) : null}
-    </Animated.View>
+      </Modal>
+    </>
   );
 }
 
-function JobList({
-  inspection,
-  onSelect,
-}: {
-  inspection: EngineInspection | null;
-  onSelect: (runId: string) => void;
-}) {
-  if (!inspection) {
-    return <Text style={styles.emptyText}>no live engine — run a scenario, open the playground, or start a field test</Text>;
-  }
-  if (inspection.jobs.length === 0) {
-    return <Text style={styles.emptyText}>engine is up, queue is empty — add some work</Text>;
-  }
-  return (
-    <View>
-      {PHASE_SECTIONS.map(phase => {
-        const jobs = inspection.jobs.filter(job => job.phase === phase);
-        if (jobs.length === 0) return null;
-        const meta = PHASE_META[phase];
-        return (
-          <View key={phase} style={styles.section}>
-            <Text style={[styles.sectionTitle, { color: meta.color }]}>
-              {meta.glyph} {meta.title} ({jobs.length})
-            </Text>
-            {jobs.map(job => (
-              <Pressable
-                key={job.runId}
-                testID={`panel-job-${job.runId}`}
-                style={styles.jobRow}
-                onPress={() => onSelect(job.runId)}
-              >
-                <View style={styles.jobRowMain}>
-                  <Text style={styles.jobLabel} numberOfLines={1}>
-                    {job.label} <Text style={{ color: colors.textMuted }}>· {job.workflowName}</Text>
-                  </Text>
-                  <Text style={styles.jobSub} numberOfLines={1}>
-                    stage {job.stage} · attempts {job.attempts}
-                    {job.phase === 'backoff' || job.phase === 'waiting' || job.phase === 'held'
-                      ? ` · next ${dueIn(job.scheduledFor)}`
-                      : ''}
-                    {job.phase === 'completed' ? ` · done ${timeOf(job.currentTask?.completedAt)}` : ''}
-                  </Text>
-                </View>
-                <Text style={styles.jobChevron}>›</Text>
-              </Pressable>
-            ))}
-          </View>
-        );
-      })}
-
-      <View style={styles.section}>
-        <Text style={[styles.sectionTitle, { color: colors.textMuted }]}>engine log</Text>
-        {inspection.logs.map((line, i) => (
-          <Text key={i} style={styles.logLine} numberOfLines={2}>
-            {line}
-          </Text>
-        ))}
-      </View>
-    </View>
-  );
-}
-
-function JobDetail({
-  job,
-  onBack,
-  onRetry,
-  onCancel,
-}: {
-  job: JobRecord;
-  onBack: () => void;
-  onRetry?: () => void;
-  onCancel?: () => void;
-}) {
-  const task = job.currentTask;
-  const meta = PHASE_META[job.phase];
-  return (
-    <View>
-      <View style={styles.detailHeader}>
-        <Pressable testID="panel-job-back" style={styles.controlGhost} onPress={onBack}>
-          <Text style={styles.controlGhostText}>← ALL JOBS</Text>
-        </Pressable>
-        {onRetry ? (
-          <Pressable testID="panel-job-retry" style={styles.controlButton} onPress={onRetry}>
-            <Text style={styles.controlButtonText}>FORCE RETRY</Text>
-          </Pressable>
-        ) : null}
-        {onCancel ? (
-          <Pressable testID="panel-job-cancel" style={styles.controlDanger} onPress={onCancel}>
-            <Text style={styles.controlButtonText}>CANCEL</Text>
-          </Pressable>
-        ) : null}
-      </View>
-
-      <Text style={styles.detailTitle}>
-        {job.label} <Text style={{ color: meta.color }}>({meta.glyph} {job.phase})</Text>
-      </Text>
-
-      <DetailSection title="execution">
-        <Mono>
-          runId       {job.runId}
-          {'\n'}workflow    {job.workflowName}
-          {job.execution.workflowVersion ? ` (${job.execution.workflowVersion})` : ''}
-          {'\n'}status      {job.execution.status}
-          {'\n'}stage       {job.execution.currentActivityName} (index {job.execution.currentActivityIndex})
-          {'\n'}created     {timeOf(job.createdAt)}
-          {job.execution.uniqueKey ? `\nuniqueKey   ${job.execution.uniqueKey}` : ''}
-        </Mono>
-      </DetailSection>
-
-      <DetailSection title={`pipeline trail (${job.tasks.length} task${job.tasks.length === 1 ? '' : 's'})`}>
-        {job.tasks.map((t, i) => (
-          <Text key={t.taskId} style={styles.trailLine}>
-            {i + 1}. {taskGlyph(t)} {t.activityName} — {t.status}, attempts {t.attempts}
-            {t.completedAt ? `, done ${timeOf(t.completedAt)}` : ''}
-          </Text>
-        ))}
-      </DetailSection>
-
-      <DetailSection title="input payload">
-        <Json value={job.execution.input} />
-      </DetailSection>
-
-      <DetailSection title="accumulated state (input + every stage's returns)">
-        <Json value={job.execution.state} />
-      </DetailSection>
-
-      {job.execution.metadata ? (
-        <DetailSection title="metadata (app-defined scoping)">
-          <Json value={job.execution.metadata} />
-        </DetailSection>
-      ) : null}
-
-      {task ? (
-        <DetailSection title="current task">
-          <Mono>
-            status      {task.status}
-            {'\n'}attempts    {task.attempts}
-            {task.scheduledFor ? `\nnext due    ${dueIn(task.scheduledFor)} (${timeOf(task.scheduledFor)})` : ''}
-            {task.ownerId ? `\nlease owner ${task.ownerId}` : ''}
-            {task.leaseExpiresAt ? `\nlease ends  ${timeOf(task.leaseExpiresAt)}` : ''}
-          </Mono>
-        </DetailSection>
-      ) : null}
-
-      {task?.errorHistory && task.errorHistory.length > 0 ? (
-        <DetailSection title={`attempt history (${task.errorHistory.length})`}>
-          {task.errorHistory.map((entry, i) => (
-            <Text
-              key={i}
-              style={[styles.trailLine, { color: entry.kind === 'skip' ? colors.textMuted : colors.errorBright }]}
-            >
-              {timeOf(entry.at)} [{entry.kind}] {entry.message}
-            </Text>
-          ))}
-        </DetailSection>
-      ) : null}
-
-      {job.deadLetter ? (
-        <DetailSection title="dead letter">
-          <Mono>
-            error     {job.deadLetter.error}
-            {'\n'}attempts  {job.deadLetter.attempts}
-            {'\n'}failed at {timeOf(job.deadLetter.failedAt)}
-          </Mono>
-        </DetailSection>
-      ) : null}
-    </View>
-  );
-}
-
-function taskGlyph(task: ActivityTask): string {
-  switch (task.status) {
-    case 'completed':
-      return '✓';
-    case 'active':
-      return '▶';
-    case 'failed':
-      return '✗';
-    default:
-      return '·';
-  }
-}
-
-function DetailSection({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <View style={styles.section}>
-      <Text style={styles.sectionTitle}>{title}</Text>
-      {children}
-    </View>
-  );
-}
-
-function Mono({ children }: { children: React.ReactNode }) {
-  return <Text style={styles.monoBlock}>{children}</Text>;
-}
-
-function Json({ value }: { value: unknown }) {
-  return <Text style={styles.monoBlock}>{JSON.stringify(value, null, 2)}</Text>;
-}
-
-function Kpi({
-  value,
-  label,
-  active,
-  valueColor,
-}: {
-  value: number;
-  label: string;
-  active: boolean;
-  valueColor?: string;
-}) {
+function Kpi({ value, label, tone }: { value: number; label: string; tone?: string }) {
   return (
     <View style={styles.kpiCell}>
-      <Text style={[styles.kpiValue, { color: valueColor ?? (active ? colors.textPrimary : colors.textMuted) }]} numberOfLines={1}>
+      <Text style={[styles.kpiValue, tone ? { color: tone } : null]} numberOfLines={1}>
         {value}
       </Text>
       <Text style={styles.kpiLabel} numberOfLines={1}>
@@ -499,94 +178,564 @@ function Kpi({
   );
 }
 
+// --- Status ------------------------------------------------------------------
+
+function StatusTab({
+  session,
+  inspection,
+  onDutyChanged,
+}: {
+  session: DemoEngineSession;
+  inspection: EngineInspection | null;
+  onDutyChanged?: () => void;
+}) {
+  const [onDuty, setOnDuty] = useState(session.isOnDuty());
+  const [endpointDraft, setEndpointDraft] = useState(session.endpoint);
+  const [resetting, setResetting] = useState(false);
+  const counts = inspection?.counts;
+
+  const toggleDuty = useCallback(
+    (value: boolean) => {
+      session.setOnDuty(value);
+      setOnDuty(value);
+      onDutyChanged?.();
+    },
+    [session, onDutyChanged]
+  );
+
+  const confirmReset = useCallback(() => {
+    Alert.alert('Reset demo data?', 'Every job, delivery record, and dead letter will be deleted.', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Reset',
+        style: 'destructive',
+        onPress: () => {
+          void (async () => {
+            setResetting(true);
+            try {
+              await session.reset();
+            } finally {
+              setResetting(false);
+            }
+          })();
+        },
+      },
+    ]);
+  }, [session]);
+
+  return (
+    <View>
+      <SectionHeader>Engine</SectionHeader>
+      <Card style={styles.groupCard}>
+        <ListRow first title="Status" value={session.isOpen() ? 'Running' : 'Stopped'} />
+        <ListRow title="Database" value="endura-demo.db" />
+        <ListRow title="Tick interval" value="1 second" />
+      </Card>
+
+      <SectionHeader>Connectivity</SectionHeader>
+      <Card style={styles.groupCard}>
+        <ListRow first title="Device radio" value={session.isOnline() ? 'Online' : 'Offline'} />
+      </Card>
+      <Text style={styles.groupFootnote}>
+        Read from the device itself. To test offline behavior, use real Airplane Mode — there is nothing to
+        simulate.
+      </Text>
+
+      <SectionHeader>App State</SectionHeader>
+      <Card style={styles.groupCard}>
+        <View style={styles.switchRow}>
+          <Text style={type.body}>On duty</Text>
+          <Switch testID="panel-duty-switch" value={onDuty} onValueChange={toggleDuty} />
+        </View>
+      </Card>
+      <Text style={styles.groupFootnote}>
+        State the device can’t change by itself. Duty-gated workflows hold while this is off and release the
+        moment it flips back on.
+      </Text>
+
+      <SectionHeader>Delivery Endpoint</SectionHeader>
+      <Card style={styles.groupCard}>
+        <TextInput
+          testID="panel-endpoint-input"
+          style={styles.endpointInput}
+          value={endpointDraft}
+          onChangeText={setEndpointDraft}
+          onEndEditing={() => {
+            session.setEndpoint(endpointDraft);
+            setEndpointDraft(session.endpoint);
+          }}
+          autoCapitalize="none"
+          autoCorrect={false}
+          keyboardType="url"
+          placeholder={DEFAULT_ENDPOINT}
+        />
+      </Card>
+      <Text style={styles.groupFootnote}>
+        Where most cards deliver to. Paste a webhook.site URL to watch your phone’s deliveries arrive on a
+        laptop.
+      </Text>
+
+      <SectionHeader>Queue</SectionHeader>
+      <Card style={styles.groupCard}>
+        <ListRow first title="In queue" value={`${counts ? counts.waiting + counts.held + counts.backoff : 0}`} />
+        <ListRow title="Running now" value={`${counts?.active ?? 0}`} />
+        <ListRow title="Delivered" value={`${counts?.completed ?? 0}`} />
+        <ListRow title="Dead letters" value={`${counts ? counts.dead + counts.failed : 0}`} />
+      </Card>
+
+      <Card style={styles.groupCard}>
+        <Button
+          testID="panel-reset"
+          label={resetting ? 'Resetting…' : 'Reset Demo Data'}
+          variant="destructive"
+          onPress={confirmReset}
+          disabled={resetting}
+        />
+      </Card>
+    </View>
+  );
+}
+
+// --- Setup ---------------------------------------------------------------
+
+function SetupTab({ session }: { session: DemoEngineSession }) {
+  const activityCount = session.registered.reduce((sum, entry) => sum + entry.workflow.activities.length, 0);
+  return (
+    <View>
+      <Text style={[type.subhead, styles.tabIntro]}>
+        {session.registered.length} workflows and {activityCount} activities are registered with this engine —
+        read live from the definitions, exactly as the code declared them.
+      </Text>
+      {session.registered.map(entry => (
+        <View key={entry.workflow.name}>
+          <SectionHeader>{entry.workflow.name}</SectionHeader>
+          <Card style={styles.groupCard}>
+            {entry.workflow.activities.map((activity, i) => {
+              const options = activity.options ?? {};
+              const details = [
+                `priority ${options.priority ?? 0}`,
+                `up to ${options.retry?.maximumAttempts ?? 1} attempt${(options.retry?.maximumAttempts ?? 1) === 1 ? '' : 's'}`,
+                options.startToCloseTimeout ? `${Math.round(options.startToCloseTimeout / 1000)}s timeout` : null,
+                options.runWhen ? 'gated by runWhen' : null,
+              ].filter(Boolean);
+              return (
+                <ListRow
+                  key={activity.name}
+                  first={i === 0}
+                  title={`${i + 1}.  ${activity.name}`}
+                  subtitle={details.join(' · ')}
+                />
+              );
+            })}
+          </Card>
+          <Text style={styles.groupFootnote}>{entry.description}</Text>
+        </View>
+      ))}
+    </View>
+  );
+}
+
+// --- Jobs ----------------------------------------------------------------
+
+function JobsTab({
+  inspection,
+  onSelect,
+}: {
+  inspection: EngineInspection | null;
+  onSelect: (runId: string) => void;
+}) {
+  if (!inspection || inspection.jobs.length === 0) {
+    return (
+      <Text style={[type.subhead, styles.tabIntro]}>
+        The queue is empty. Every job you create from the cards shows up here, grouped by what the engine is
+        doing with it right now.
+      </Text>
+    );
+  }
+  return (
+    <View>
+      {PHASE_SECTIONS.map(phase => {
+        const jobs = inspection.jobs.filter(job => job.phase === phase);
+        if (jobs.length === 0) return null;
+        const meta = PHASE_META[phase];
+        return (
+          <View key={phase}>
+            <SectionHeader>
+              {meta.title} · {jobs.length}
+            </SectionHeader>
+            <Card style={styles.groupCard}>
+              {jobs.map((job, i) => (
+                <ListRow
+                  key={job.runId}
+                  first={i === 0}
+                  testID={`panel-job-${job.runId}`}
+                  title={job.label}
+                  subtitle={jobSubtitle(job)}
+                  right={<Pill label={phaseLabel(job.phase)} color={meta.color} softColor={meta.soft} />}
+                  onPress={() => onSelect(job.runId)}
+                />
+              ))}
+            </Card>
+          </View>
+        );
+      })}
+    </View>
+  );
+}
+
+function phaseLabel(phase: JobPhase): string {
+  switch (phase) {
+    case 'active':
+      return 'Running';
+    case 'backoff':
+      return 'Retrying';
+    case 'held':
+      return 'Held';
+    case 'waiting':
+      return 'Waiting';
+    case 'dead':
+      return 'Dead';
+    case 'failed':
+      return 'Failed';
+    case 'cancelled':
+      return 'Cancelled';
+    case 'completed':
+      return 'Done';
+  }
+}
+
+function jobSubtitle(job: JobRecord): string {
+  const parts = [`${job.workflowName} · ${job.stage}`];
+  if (job.attempts > 0) parts.push(`attempt ${job.attempts}`);
+  if (job.phase === 'backoff' || job.phase === 'held' || job.phase === 'waiting') {
+    parts.push(`next ${dueIn(job.scheduledFor)}`);
+  }
+  if (job.phase === 'completed') parts.push(`done ${timeOf(job.currentTask?.completedAt)}`);
+  return parts.join(' · ');
+}
+
+function JobDetail({
+  job,
+  session,
+  onBack,
+}: {
+  job: JobRecord;
+  session: DemoEngineSession;
+  onBack: () => void;
+}) {
+  const [actionError, setActionError] = useState<string | null>(null);
+  const task = job.currentTask;
+  const meta = PHASE_META[job.phase];
+
+  const runAction = (fn: () => Promise<void>) => () => {
+    void (async () => {
+      setActionError(null);
+      try {
+        await fn();
+        onBack();
+      } catch (err) {
+        setActionError(String(err));
+      }
+    })();
+  };
+
+  return (
+    <View>
+      <View style={styles.detailHeader}>
+        <Button testID="panel-job-back" label="‹ All Jobs" variant="plain" small onPress={onBack} />
+        <View style={styles.detailHeaderSpacer} />
+        {job.deadLetter ? (
+          <Button
+            testID="panel-job-retry"
+            label="Retry"
+            variant="tinted"
+            small
+            onPress={runAction(() => session.retryDeadLetter(job.deadLetter!.id))}
+          />
+        ) : null}
+        {job.execution.status === 'running' ? (
+          <Button
+            testID="panel-job-cancel"
+            label="Cancel"
+            variant="destructive"
+            small
+            onPress={runAction(() => session.cancelExecution(job.runId))}
+          />
+        ) : null}
+      </View>
+      {actionError ? <Text style={styles.actionError}>{actionError}</Text> : null}
+
+      <View style={styles.detailTitleRow}>
+        <Text style={type.title3}>{job.label}</Text>
+        <Pill label={phaseLabel(job.phase)} color={meta.color} softColor={meta.soft} />
+      </View>
+
+      <SectionHeader>Execution</SectionHeader>
+      <Card style={styles.groupCard}>
+        <ListRow first title="Workflow" value={job.workflowName} />
+        <ListRow title="Run ID" value={job.runId.slice(0, 18)} />
+        <ListRow title="Status" value={job.execution.status} />
+        <ListRow title="Stage" value={`${job.execution.currentActivityName} (#${job.execution.currentActivityIndex + 1})`} />
+        <ListRow title="Created" value={timeOf(job.createdAt)} />
+        {job.execution.uniqueKey ? <ListRow title="Unique key" value={job.execution.uniqueKey} /> : null}
+      </Card>
+
+      <SectionHeader>Pipeline · {job.tasks.length} task{job.tasks.length === 1 ? '' : 's'}</SectionHeader>
+      <Card style={styles.groupCard}>
+        {job.tasks.map((t, i) => (
+          <ListRow
+            key={t.taskId}
+            first={i === 0}
+            title={`${i + 1}.  ${t.activityName}`}
+            subtitle={`${t.attempts} attempt${t.attempts === 1 ? '' : 's'}${t.completedAt ? ` · done ${timeOf(t.completedAt)}` : ''}`}
+            right={<Pill {...taskPill(t)} />}
+          />
+        ))}
+      </Card>
+
+      {task ? (
+        <>
+          <SectionHeader>Current Task</SectionHeader>
+          <Card style={styles.groupCard}>
+            <ListRow first title="Status" value={task.status} />
+            <ListRow title="Attempts" value={`${task.attempts}`} />
+            {task.scheduledFor ? <ListRow title="Next due" value={`${dueIn(task.scheduledFor)} (${timeOf(task.scheduledFor)})`} /> : null}
+            {task.ownerId ? <ListRow title="Lease owner" value={task.ownerId.slice(0, 16)} /> : null}
+            {task.leaseExpiresAt ? <ListRow title="Lease ends" value={timeOf(task.leaseExpiresAt)} /> : null}
+          </Card>
+        </>
+      ) : null}
+
+      {task?.errorHistory && task.errorHistory.length > 0 ? (
+        <>
+          <SectionHeader>Attempt History · {task.errorHistory.length}</SectionHeader>
+          <Card style={styles.groupCard}>
+            {task.errorHistory.map((entry, i) => (
+              <ListRow
+                key={i}
+                first={i === 0}
+                title={entry.kind === 'skip' ? 'Held' : 'Failed'}
+                subtitle={`${timeOf(entry.at)} — ${entry.message}`}
+                right={
+                  <Pill
+                    label={entry.kind === 'skip' ? 'gate' : 'error'}
+                    color={entry.kind === 'skip' ? colors.orange : colors.red}
+                    softColor={entry.kind === 'skip' ? colors.orangeSoft : colors.redSoft}
+                  />
+                }
+              />
+            ))}
+          </Card>
+        </>
+      ) : null}
+
+      {job.deadLetter ? (
+        <>
+          <SectionHeader>Dead Letter</SectionHeader>
+          <Card style={styles.groupCard}>
+            <ListRow first title="Error" subtitle={job.deadLetter.error} />
+            <ListRow title="Attempts" value={`${job.deadLetter.attempts}`} />
+            <ListRow title="Failed at" value={timeOf(job.deadLetter.failedAt)} />
+          </Card>
+        </>
+      ) : null}
+
+      <SectionHeader>Input Payload</SectionHeader>
+      <JsonWell value={job.execution.input} />
+
+      <SectionHeader>Accumulated State</SectionHeader>
+      <JsonWell value={job.execution.state} />
+      <Text style={styles.groupFootnote}>
+        The input plus every completed stage’s return value — what the next stage receives.
+      </Text>
+    </View>
+  );
+}
+
+function taskPill(task: ActivityTask): { label: string; color: string; softColor: string } {
+  switch (task.status) {
+    case 'completed':
+      return { label: 'Done', color: colors.green, softColor: colors.greenSoft };
+    case 'active':
+      return { label: 'Running', color: colors.tint, softColor: colors.tintSoft };
+    case 'failed':
+      return { label: 'Failed', color: colors.red, softColor: colors.redSoft };
+    case 'skipped':
+      return { label: 'Skipped', color: colors.gray, softColor: colors.graySoft };
+    default:
+      return { label: 'Pending', color: colors.gray, softColor: colors.graySoft };
+  }
+}
+
+function JsonWell({ value }: { value: unknown }) {
+  return (
+    <Card style={styles.groupCard}>
+      <Text style={styles.json}>{JSON.stringify(value, null, 2)}</Text>
+    </Card>
+  );
+}
+
+// --- Log -------------------------------------------------------------------
+
+function LogTab({ inspection }: { inspection: EngineInspection | null }) {
+  return (
+    <View>
+      <Text style={[type.subhead, styles.tabIntro]}>
+        The engine narrating itself — every tick, claim, delivery, hold, and retry, newest last.
+      </Text>
+      <Card style={styles.groupCard}>
+        {(inspection?.logs ?? []).length === 0 ? (
+          <Text style={type.footnote}>Nothing yet.</Text>
+        ) : (
+          inspection!.logs.map((line, i) => (
+            <Text key={i} style={styles.logLine} numberOfLines={2}>
+              {line}
+            </Text>
+          ))
+        )}
+      </Card>
+    </View>
+  );
+}
+
+// --- Tests -------------------------------------------------------------------
+
+type TestState = 'idle' | 'running' | 'passed' | 'failed';
+
+function TestsTab() {
+  const [states, setStates] = useState<Record<string, TestState>>({});
+  const [progress, setProgress] = useState<string | null>(null);
+
+  const runOne = useCallback(async (scenarioId: string) => {
+    const scenario = scenarios.find(s => s.scenarioId === scenarioId)!;
+    setStates(prev => ({ ...prev, [scenarioId]: 'running' }));
+    const result = await runScenario(scenario, expoPlatform);
+    setStates(prev => ({ ...prev, [scenarioId]: result.status }));
+  }, []);
+
+  const runAll = useCallback(async () => {
+    let index = 0;
+    for (const scenario of scenarios) {
+      index += 1;
+      setProgress(`Running ${index} of ${scenarios.length}: ${scenario.name}`);
+      // Serial on purpose: scenarios own their databases but share the device.
+      // eslint-disable-next-line no-await-in-loop
+      await runOne(scenario.scenarioId);
+    }
+    setProgress(null);
+  }, [runOne]);
+
+  const passed = Object.values(states).filter(s => s === 'passed').length;
+
+  return (
+    <View>
+      <Text style={[type.subhead, styles.tabIntro]}>
+        The engine’s parity suite: {scenarios.length} production failure scenarios — crashes, connectivity
+        loss, duplicate wakes, stale results — each run live against real SQLite on this device.
+      </Text>
+      <Card style={styles.groupCard}>
+        <Button
+          testID="run-all"
+          label={progress ?? (passed > 0 ? `Run All Again (${passed}/${scenarios.length} passed)` : 'Run All Scenarios')}
+          variant="filled"
+          onPress={() => void runAll()}
+          disabled={progress !== null}
+        />
+      </Card>
+      <Card style={styles.groupCard}>
+        {scenarios.map((scenario, i) => {
+          const state = states[scenario.scenarioId] ?? 'idle';
+          const pill =
+            state === 'passed'
+              ? { label: 'Pass', color: colors.green, softColor: colors.greenSoft }
+              : state === 'failed'
+                ? { label: 'Fail', color: colors.red, softColor: colors.redSoft }
+                : state === 'running'
+                  ? { label: 'Running', color: colors.tint, softColor: colors.tintSoft }
+                  : { label: 'Run', color: colors.gray, softColor: colors.graySoft };
+          return (
+            <ListRow
+              key={scenario.scenarioId}
+              first={i === 0}
+              title={scenario.name}
+              subtitle={`Scenario ${scenario.category}`}
+              right={<Pill {...pill} />}
+              onPress={state === 'running' ? undefined : () => void runOne(scenario.scenarioId)}
+            />
+          );
+        })}
+      </Card>
+    </View>
+  );
+}
+
+// --- Styles ------------------------------------------------------------------
+
 const styles = StyleSheet.create({
-  panel: {
-    backgroundColor: colors.cardElevated,
-    borderTopWidth: 1,
-    borderTopColor: colors.hairline,
-    paddingHorizontal: spacing.md,
-    overflow: 'hidden',
+  dock: {
+    backgroundColor: colors.card,
+    borderTopLeftRadius: radius.xl,
+    borderTopRightRadius: radius.xl,
+    paddingHorizontal: spacing.lg,
+    paddingTop: spacing.sm,
+    paddingBottom: spacing.xs,
+    shadowColor: '#000000',
+    shadowOpacity: 0.1,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: -6 },
+    elevation: 10,
   },
-  handle: {
-    alignSelf: 'center',
-    width: 36,
-    height: 4,
-    borderRadius: radius.full,
-    backgroundColor: colors.hairline,
-    marginTop: 5,
-    marginBottom: 3,
-  },
-  headerRow: { height: 20, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  stateBlock: { flexDirection: 'row', alignItems: 'center' },
-  dot: { fontSize: 12, marginRight: 8 },
-  stateText: { fontSize: 13, fontWeight: '800', letterSpacing: 1 },
-  onlineText: { fontFamily: mono, fontSize: 13, fontWeight: '700' },
-  kpiRow: { height: 44, flexDirection: 'row', alignItems: 'center', marginTop: 2 },
+  dockHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  dockTitleRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.xs },
+  dot: { width: 9, height: 9, borderRadius: 5 },
+  dockPills: { flexDirection: 'row', alignItems: 'center', gap: spacing.xs },
+  dockChevron: { fontSize: 15, fontWeight: '600', color: colors.tertiaryLabel, marginLeft: 2 },
+  kpiRow: { flexDirection: 'row', marginTop: spacing.sm, marginBottom: spacing.xxs },
   kpiCell: { flex: 1, alignItems: 'center' },
-  kpiValue: { fontSize: 24, fontWeight: '800', lineHeight: 28 },
-  kpiLabel: { fontSize: 9, fontWeight: '700', letterSpacing: 1.2, color: colors.textMuted },
-  ticker: { fontFamily: mono, fontSize: 12, color: colors.textSecondary, marginTop: 4 },
+  kpiValue: { fontSize: 22, fontWeight: '700', color: colors.label },
+  kpiLabel: { ...type.caption, marginTop: 1 },
 
-  managerBody: { flex: 1 },
-  controlsRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.xs, marginTop: spacing.xs },
-  controlButton: {
-    backgroundColor: colors.secondaryAccent,
-    minHeight: 44,
-    paddingHorizontal: spacing.sm,
-    justifyContent: 'center',
-    borderRadius: radius.md,
-  },
-  controlDanger: {
-    backgroundColor: colors.primaryAccent,
-    minHeight: 44,
-    paddingHorizontal: spacing.sm,
-    justifyContent: 'center',
-    borderRadius: radius.md,
-  },
-  controlButtonText: { color: colors.textPrimary, fontSize: 12, fontWeight: '700' },
-  controlGhost: { minHeight: 44, justifyContent: 'center', paddingHorizontal: spacing.xs },
-  controlGhostText: { color: colors.secondaryAccentBright, fontSize: 12, fontWeight: '700' },
-  controlNote: { color: colors.textMuted, fontSize: 12, flex: 1 },
-  controlNoteSmall: { color: colors.textMuted, fontFamily: mono, fontSize: 10, marginTop: 2 },
-  actionError: { color: colors.errorBright, fontFamily: mono, fontSize: 11, marginTop: spacing.xxs },
-
-  managerScroll: { flex: 1, marginTop: spacing.xs },
-  managerContent: { paddingBottom: spacing.xl },
-  emptyText: { color: colors.textMuted, fontFamily: mono, fontSize: 12, marginTop: spacing.md },
-
-  section: { marginTop: spacing.md },
-  sectionTitle: {
-    fontSize: 11,
-    fontWeight: '700',
-    letterSpacing: 1,
-    textTransform: 'uppercase',
-    color: colors.textMuted,
-    marginBottom: spacing.xxs,
-  },
-  jobRow: {
+  sheet: { flex: 1, backgroundColor: colors.page },
+  sheetHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    minHeight: 44,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.hairline,
-    paddingVertical: spacing.xxs,
+    justifyContent: 'space-between',
+    paddingHorizontal: spacing.lg,
+    paddingTop: spacing.md,
+    paddingBottom: spacing.xs,
   },
-  jobRowMain: { flex: 1 },
-  jobLabel: { color: colors.textPrimary, fontFamily: mono, fontSize: 13, fontWeight: '600' },
-  jobSub: { color: colors.textSecondary, fontFamily: mono, fontSize: 11, marginTop: 1 },
-  jobChevron: { color: colors.textMuted, fontSize: 20, paddingHorizontal: spacing.xs },
-  logLine: { color: colors.textMuted, fontFamily: mono, fontSize: 10, marginVertical: 1 },
+  sheetHeaderSide: { width: 60, minHeight: 30, justifyContent: 'center' },
+  doneText: { fontSize: 17, fontWeight: '600', color: colors.tint, textAlign: 'right' },
+  tabsWrap: { paddingHorizontal: spacing.lg, paddingBottom: spacing.xs },
+  sheetScroll: { flex: 1 },
+  sheetContent: { paddingHorizontal: spacing.lg, paddingBottom: spacing.xxl },
 
-  detailHeader: { flexDirection: 'row', alignItems: 'center', gap: spacing.xs, marginTop: spacing.xs },
-  detailTitle: { color: colors.textPrimary, fontFamily: mono, fontSize: 14, fontWeight: '700', marginTop: spacing.sm },
-  trailLine: { color: colors.textSecondary, fontFamily: mono, fontSize: 11, marginVertical: 1 },
-  monoBlock: {
-    color: colors.codeDefault,
-    fontFamily: mono,
-    fontSize: 11,
-    lineHeight: 16,
-    backgroundColor: colors.codeBg,
-    borderRadius: radius.md,
-    padding: spacing.sm,
+  groupCard: { marginVertical: 0, paddingVertical: spacing.xxs },
+  groupFootnote: { ...type.footnote, marginTop: spacing.xs, marginHorizontal: spacing.md },
+  tabIntro: { marginTop: spacing.md, marginBottom: spacing.xs, marginHorizontal: spacing.xxs },
+  switchRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    minHeight: 46,
+    paddingVertical: spacing.xs,
   },
+  endpointInput: {
+    ...type.body,
+    minHeight: 46,
+    paddingVertical: spacing.xs,
+  },
+
+  detailHeader: { flexDirection: 'row', alignItems: 'center', marginTop: spacing.sm, gap: spacing.xs },
+  detailHeaderSpacer: { flex: 1 },
+  detailTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginTop: spacing.md,
+    gap: spacing.sm,
+  },
+  actionError: { ...type.footnote, color: colors.red, marginTop: spacing.xs },
+  json: { fontFamily: mono, fontSize: 12, lineHeight: 17, color: colors.codeDefault },
+  logLine: { fontFamily: mono, fontSize: 11, lineHeight: 16, color: colors.secondaryLabel, marginVertical: 1 },
 });
