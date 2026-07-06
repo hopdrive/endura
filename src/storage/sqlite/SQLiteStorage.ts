@@ -14,6 +14,7 @@ import {
 } from '../../core/types';
 import { SQLiteDriver, SQLiteRow } from './internal/SQLiteDriver';
 import { getSchemaStatements, MIGRATIONS, SCHEMA_VERSION } from './internal/schema';
+import { generateId } from '../../core/utils';
 
 /**
  * SQLite-based storage adapter.
@@ -119,6 +120,32 @@ export class SQLiteStorage implements Storage {
   // Row Mapping Helpers
   // ============================================================================
 
+  /**
+   * Parse a JSON payload column, degrading to an empty object on
+   * corruption. Read paths must never throw on a single bad row (H10) —
+   * one poison row would otherwise stall every poll forever. The
+   * quarantine in getPendingActivityTasks provides the observable
+   * signal; here we just keep reads alive.
+   */
+  private safeJsonParse(raw: unknown): Record<string, unknown> {
+    if (raw == null) return {};
+    try {
+      return JSON.parse(raw as string) as Record<string, unknown>;
+    } catch {
+      return {};
+    }
+  }
+
+  private isParseable(raw: unknown): boolean {
+    if (raw == null) return true;
+    try {
+      JSON.parse(raw as string);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   private rowToExecution(row: SQLiteRow): WorkflowExecution {
     return {
       runId: row['run_id'] as string,
@@ -128,8 +155,8 @@ export class SQLiteStorage implements Storage {
       currentActivityIndex: row['current_activity_index'] as number,
       currentActivityName: row['current_activity_name'] as string,
       status: row['status'] as WorkflowExecutionStatus,
-      input: JSON.parse(row['input'] as string) as Record<string, unknown>,
-      state: JSON.parse(row['state'] as string) as Record<string, unknown>,
+      input: this.safeJsonParse(row['input']),
+      state: this.safeJsonParse(row['state']),
       createdAt: row['created_at'] as number,
       updatedAt: row['updated_at'] as number,
       completedAt: row['completed_at'] != null ? Number(row['completed_at']) : undefined,
@@ -149,10 +176,8 @@ export class SQLiteStorage implements Storage {
       failures: row['failures'] != null ? Number(row['failures']) : 0,
       maxAttempts: row['max_attempts'] as number,
       timeout: row['timeout'] as number,
-      input: JSON.parse(row['input'] as string) as Record<string, unknown>,
-      result: row['result']
-        ? (JSON.parse(row['result'] as string) as Record<string, unknown>)
-        : undefined,
+      input: this.safeJsonParse(row['input']),
+      result: row['result'] ? this.safeJsonParse(row['result']) : undefined,
       createdAt: row['created_at'] as number,
       scheduledFor: row['scheduled_for'] != null ? Number(row['scheduled_for']) : undefined,
       startedAt: row['started_at'] != null ? Number(row['started_at']) : undefined,
@@ -172,7 +197,7 @@ export class SQLiteStorage implements Storage {
       taskId: row['task_id'] as string,
       activityName: row['activity_name'] as string,
       workflowName: row['workflow_name'] as string,
-      input: JSON.parse(row['input'] as string) as Record<string, unknown>,
+      input: this.safeJsonParse(row['input']),
       error: row['error'] as string,
       errorStack: row['error_stack'] != null ? String(row['error_stack'] as string) : undefined,
       attempts: row['attempts'] as number,
@@ -434,7 +459,56 @@ export class SQLiteStorage implements Storage {
       [now, limit]
     );
 
-    return rows.map(row => this.rowToTask(row));
+    // Quarantine poison rows instead of throwing: one corrupt payload
+    // must not stall the entire queue (H10).
+    const tasks: ActivityTask[] = [];
+    for (const row of rows) {
+      if (!this.isParseable(row['input'])) {
+        await this.quarantineCorruptTaskRow(row, now);
+        continue;
+      }
+      tasks.push(this.rowToTask(row));
+    }
+    return tasks;
+  }
+
+  /**
+   * Take a task with an unparseable payload out of the queue: mark it
+   * failed and dead-letter it (nonRetryable — the payload is gone, so a
+   * redrive could never succeed). Atomic so a crash can't leave a
+   * failed task without its dead letter.
+   */
+  private async quarantineCorruptTaskRow(row: SQLiteRow, now: number): Promise<void> {
+    const taskId = row['task_id'] as string;
+    const runId = row['run_id'] as string;
+
+    const executionRows = await this.driver.query(
+      `SELECT workflow_name FROM executions WHERE run_id = ?`,
+      [runId]
+    );
+    const workflowName = (executionRows[0]?.['workflow_name'] as string) ?? 'unknown';
+
+    await this.transaction(async () => {
+      await this.driver.execute(
+        `UPDATE activity_tasks SET status = 'failed', error = ?, completed_at = ? WHERE task_id = ?`,
+        ['Corrupt task payload quarantined (unparseable JSON)', now, taskId]
+      );
+      await this.saveDeadLetter({
+        id: generateId(),
+        runId,
+        taskId,
+        activityName: row['activity_name'] as string,
+        workflowName,
+        input: {},
+        error: 'Corrupt task payload quarantined (unparseable JSON)',
+        attempts: (row['attempts'] as number) ?? 0,
+        failedAt: now,
+        acknowledged: false,
+        nonRetryable: true,
+      });
+    });
+
+    this.notifySubscribers({ type: 'task', operation: 'update', id: taskId });
   }
 
   async claimActivityTask(
