@@ -40,6 +40,10 @@ const DEFAULT_INITIAL_INTERVAL = 1000;
 const DEFAULT_BACKOFF_COEFFICIENT = 2;
 const DEFAULT_PRIORITY = 0;
 const DEFAULT_LEASE_MS = 60000;
+// How long to park a task whose activity isn't registered (upgrade skew)
+// before re-checking. Long enough to avoid busy-spinning, short enough
+// that a hotfixed definition picks the task up promptly.
+const HELD_TASK_RECHECK_DELAY = 60000;
 
 /**
  * The WorkflowEngine orchestrates workflow execution.
@@ -195,13 +199,15 @@ export class WorkflowEngine {
         continue;
       }
 
-      // No record of the frontier activity at all — schedule it.
-      const activity = workflow.activities[execution.currentActivityIndex];
-      if (!activity || activity.name !== execution.currentActivityName) {
-        this.logger.warn('Cannot reconcile stranded execution: activity mismatch', {
+      // No record of the frontier activity at all — schedule it. Resolve
+      // by NAME: after an app upgrade the persisted index may point at a
+      // different step in the new definition (H7).
+      const activity = workflow.activities.find(a => a.name === execution.currentActivityName);
+      if (!activity) {
+        this.logger.warn('Cannot reconcile stranded execution: activity not in registered definition — holding', {
           runId: execution.runId,
-          expected: execution.currentActivityName,
-          found: activity?.name,
+          activityName: execution.currentActivityName,
+          workflowName: workflow.name,
         });
         continue;
       }
@@ -226,10 +232,16 @@ export class WorkflowEngine {
     }
     this.workflows.set(workflow.name, workflow);
 
-    // Also register all activities from this workflow. The engine
-    // erases per-activity input/output generics internally.
-    for (const activity of workflow.activities) {
-      this.activities.set(activity.name, activity as Activity);
+    // Rebuild the activity map from every registered workflow rather
+    // than accumulating: re-registering a changed definition must not
+    // leave its previous activities reachable, or an in-flight task
+    // could execute stale code after an app upgrade.
+    this.activities.clear();
+    for (const registered of this.workflows.values()) {
+      // The engine erases per-activity input/output generics internally.
+      for (const activity of registered.activities) {
+        this.activities.set(activity.name, activity as Activity);
+      }
     }
 
     this.logger.debug('Registered workflow', {
@@ -280,6 +292,7 @@ export class WorkflowEngine {
     const execution: WorkflowExecution = {
       runId,
       workflowName: workflow.name,
+      workflowVersion: workflow.version,
       uniqueKey: options.uniqueKey,
       currentActivityIndex: 0,
       currentActivityName: firstActivity.name,
@@ -597,8 +610,11 @@ export class WorkflowEngine {
 
     const activity = this.activities.get(task.activityName);
     if (!activity) {
-      this.logger.error('Activity not found', { activityName: task.activityName });
-      await this.handleTaskPermanentFailure(claimed, new Error(`Activity '${task.activityName}' not registered`));
+      // Upgrade skew: the persisted task references an activity this
+      // build doesn't register (renamed/removed step). Hold — never
+      // dead-letter — so a later release that restores the name resumes
+      // the workflow instead of every in-flight execution being nuked.
+      await this.handleTaskHeld(claimed);
       return true;
     }
 
@@ -819,11 +835,51 @@ export class WorkflowEngine {
       return;
     }
 
+    // Surface definition version skew (observability only — name-based
+    // matching below keeps mixed-version resumes safe).
+    if (
+      workflow.version !== undefined &&
+      execution.workflowVersion !== undefined &&
+      workflow.version !== execution.workflowVersion
+    ) {
+      this.emitEvent({
+        type: 'execution:version-skew',
+        timestamp: now,
+        runId: execution.runId,
+        workflowName: workflow.name,
+        persistedVersion: execution.workflowVersion,
+        registeredVersion: workflow.version,
+      });
+      this.logger.warn('Execution resumed under a different workflow definition version', {
+        runId: execution.runId,
+        persistedVersion: execution.workflowVersion,
+        registeredVersion: workflow.version,
+      });
+    }
+
     // Merge result into workflow state
     const newState = mergeState(execution.state, result);
 
+    // Locate the completed activity by NAME in the CURRENT definition.
+    // The persisted index belongs to the definition that scheduled the
+    // task; after an app upgrade that inserted/removed steps, index
+    // arithmetic would re-run or skip the wrong activity (H7).
+    const completedIndex = workflow.activities.findIndex(a => a.name === completedTask.activityName);
+    if (completedIndex === -1) {
+      // The completed step no longer exists in this build's definition,
+      // so its successor is unknowable. Leave the execution running with
+      // no frontier task — reconciliation replays this advance and
+      // succeeds once a definition containing the activity is registered.
+      this.logger.warn('Completed activity not in registered definition — holding advance', {
+        runId: execution.runId,
+        activityName: completedTask.activityName,
+        workflowName: workflow.name,
+      });
+      return;
+    }
+
     // Check if this was the last activity
-    const nextIndex = execution.currentActivityIndex + 1;
+    const nextIndex = completedIndex + 1;
     const isComplete = nextIndex >= workflow.activities.length;
 
     if (isComplete) {
@@ -1048,6 +1104,42 @@ export class WorkflowEngine {
       taskId: task.taskId,
       activityName: task.activityName,
       error: error.message,
+    });
+  }
+
+  /**
+   * Hold a task whose activity isn't registered in this build (upgrade
+   * skew). The claim is released without burning an attempt and the task
+   * is parked pending with a recheck delay — it self-heals as soon as a
+   * definition containing the activity is registered again.
+   */
+  private async handleTaskHeld(task: ActivityTask): Promise<void> {
+    const now = this.clock.now();
+
+    const heldTask: ActivityTask = {
+      ...task,
+      status: 'pending',
+      scheduledFor: now + HELD_TASK_RECHECK_DELAY,
+      lastAttemptAt: now,
+      ownerId: undefined,
+      leaseExpiresAt: undefined,
+      // Being held is not a failure and must not burn the claim either
+      attempts: Math.max(0, task.attempts - 1),
+    };
+    await this.storage.saveActivityTask(heldTask);
+
+    this.emitEvent({
+      type: 'activity:held',
+      timestamp: now,
+      runId: task.runId,
+      taskId: task.taskId,
+      activityName: task.activityName,
+    });
+
+    this.logger.warn('Activity not registered in this build — holding task', {
+      taskId: task.taskId,
+      activityName: task.activityName,
+      recheckAt: heldTask.scheduledFor,
     });
   }
 

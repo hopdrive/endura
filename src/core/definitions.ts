@@ -36,6 +36,8 @@ export function defineActivity<
 export interface DefineWorkflowOptions<TInput = Record<string, unknown>> extends WorkflowCallbacks {
   name: string;
   activities: AnyActivity[];
+  /** Optional definition version (see Workflow.version) */
+  version?: string;
   /** @internal Type brand for input type inference */
   readonly _inputType?: TInput;
 }
@@ -46,7 +48,7 @@ export interface DefineWorkflowOptions<TInput = Record<string, unknown>> extends
 export function defineWorkflow<TInput = Record<string, unknown>>(
   options: DefineWorkflowOptions<TInput>
 ): Workflow<TInput> {
-  const { name, activities, onComplete, onFailed, onCancelled } = options;
+  const { name, activities, version, onComplete, onFailed, onCancelled } = options;
 
   if (activities.length === 0) {
     throw new Error(`Workflow '${name}' must have at least one activity`);
@@ -55,6 +57,7 @@ export function defineWorkflow<TInput = Record<string, unknown>>(
   return {
     name,
     activities,
+    version,
     onComplete,
     onFailed,
     onCancelled,

@@ -123,6 +123,7 @@ export class SQLiteStorage implements Storage {
     return {
       runId: row['run_id'] as string,
       workflowName: row['workflow_name'] as string,
+      workflowVersion: row['workflow_version'] != null ? String(row['workflow_version'] as string) : undefined,
       uniqueKey: row['unique_key'] != null ? String(row['unique_key'] as string | number) : undefined,
       currentActivityIndex: row['current_activity_index'] as number,
       currentActivityName: row['current_activity_name'] as string,
@@ -194,11 +195,12 @@ export class SQLiteStorage implements Storage {
     // foreign_keys is on (better-sqlite3 enables it by default).
     await this.driver.execute(
       `INSERT INTO executions (
-        run_id, workflow_name, unique_key, current_activity_index, current_activity_name,
+        run_id, workflow_name, workflow_version, unique_key, current_activity_index, current_activity_name,
         status, input, state, created_at, updated_at, completed_at, error, failed_activity_name
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(run_id) DO UPDATE SET
         workflow_name = excluded.workflow_name,
+        workflow_version = excluded.workflow_version,
         unique_key = excluded.unique_key,
         current_activity_index = excluded.current_activity_index,
         current_activity_name = excluded.current_activity_name,
@@ -213,6 +215,7 @@ export class SQLiteStorage implements Storage {
       [
         execution.runId,
         execution.workflowName,
+        execution.workflowVersion ?? null,
         execution.uniqueKey ?? null,
         execution.currentActivityIndex,
         execution.currentActivityName,

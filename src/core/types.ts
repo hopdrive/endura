@@ -24,10 +24,16 @@ export interface WorkflowExecution {
   runId: string;
   /** References workflow definition name */
   workflowName: string;
+  /** Workflow definition version at start time (see Workflow.version) */
+  workflowVersion?: string;
   /** Optional deduplication key */
   uniqueKey?: string;
 
-  /** Position in activity sequence (0-based) */
+  /**
+   * Position in activity sequence (0-based). Advisory: the engine
+   * resolves activities by currentActivityName and repairs this index
+   * against the registered definition when they disagree (upgrade skew).
+   */
   currentActivityIndex: number;
   /** Name of current/next activity */
   currentActivityName: string;
@@ -273,6 +279,14 @@ export interface WorkflowCallbacks {
 export interface Workflow<TInput = Record<string, unknown>> extends WorkflowCallbacks {
   name: string;
   activities: AnyActivity[];
+  /**
+   * Optional definition version, stamped onto each execution at start.
+   * When a resumed execution's stored version differs from the
+   * registered definition's, the engine emits execution:version-skew —
+   * observability only, never a gate: name-based activity matching
+   * keeps mixed-version resumes safe.
+   */
+  version?: string;
   /** @internal Type brand for input type inference */
   readonly _inputType?: TInput;
 }
@@ -322,8 +336,10 @@ export type EngineEventType =
   | 'activity:completed'
   | 'activity:failed'
   | 'activity:skipped'
+  | 'activity:held'
   | 'deadletter:added'
-  | 'deadletter:redriven';
+  | 'deadletter:redriven'
+  | 'execution:version-skew';
 
 export interface EngineEvent {
   type: EngineEventType;

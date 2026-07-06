@@ -256,6 +256,22 @@ describe('schema migrations (C8)', () => {
     await storage.close();
   });
 
+  it('migrates executions to carry the workflow definition version (v4)', async () => {
+    const driver = await createPopulatedV1Db();
+    const storage = new SQLiteStorage(driver);
+    await storage.initialize();
+
+    // Legacy rows have no recorded version.
+    const legacy = await storage.getExecution('run-1');
+    expect(legacy?.workflowVersion).toBeUndefined();
+
+    // New executions round-trip the version.
+    await storage.saveExecution({ ...legacy!, workflowVersion: '7' });
+    expect((await storage.getExecution('run-1'))?.workflowVersion).toBe('7');
+
+    await storage.close();
+  });
+
   it('refuses to open a database from a newer package version', async () => {
     const driver = await createPopulatedV1Db();
     await driver.execute(`PRAGMA user_version = ${SCHEMA_VERSION + 1}`);

@@ -11,6 +11,7 @@ export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS executions (
   run_id TEXT PRIMARY KEY NOT NULL,
   workflow_name TEXT NOT NULL,
+  workflow_version TEXT,
   unique_key TEXT,
   current_activity_index INTEGER NOT NULL DEFAULT 0,
   current_activity_name TEXT NOT NULL,
@@ -113,8 +114,9 @@ export function getSchemaStatements(): string[] {
  * - v2: activity_tasks gains failures, owner_id, lease_expires_at; the
  *   executions unique index is rebuilt scoped to status='running'.
  * - v3: dead_letters gains non_retryable (M1 failure classification).
+ * - v4: executions gains workflow_version (H7 upgrade-skew detection).
  */
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 /**
  * A single schema migration. Statements run in order inside one
@@ -145,6 +147,12 @@ export const MIGRATIONS: Migration[] = [
     toVersion: 3,
     statements: [
       `ALTER TABLE dead_letters ADD COLUMN non_retryable INTEGER NOT NULL DEFAULT 0;`,
+    ],
+  },
+  {
+    toVersion: 4,
+    statements: [
+      `ALTER TABLE executions ADD COLUMN workflow_version TEXT;`,
     ],
   },
 ];
