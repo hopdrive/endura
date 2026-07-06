@@ -1,4 +1,4 @@
-# Endura Showcase App
+# Endura Example App
 
 An Expo app that is both **documentation and evidence** for Endura. Everything
 in it is real: real SQLite persistence, real HTTP deliveries to the real
@@ -7,9 +7,9 @@ simulated — you test offline behavior with actual Airplane Mode and durability
 with an actual force quit.
 
 <p align="center">
-  <img src="../../docs/images/parity-app/01-deck.png" width="250" alt="Use-case card deck" />
-  <img src="../../docs/images/parity-app/02-duty-card.png" width="250" alt="Duty-gated card holding jobs" />
-  <img src="../../docs/images/parity-app/05-sheet-jobs.png" width="250" alt="Engine inspector jobs tab" />
+  <img src="../../docs/images/example-app/01-deck.png" width="250" alt="Use-case card deck" />
+  <img src="../../docs/images/example-app/02-duty-card.png" width="250" alt="Duty-gated card holding jobs" />
+  <img src="../../docs/images/example-app/05-sheet-jobs.png" width="250" alt="Engine inspector jobs tab" />
 </p>
 
 ## The card deck
@@ -54,9 +54,9 @@ inspector, with swipeable tabs:
   SQLite on this device.
 
 <p align="center">
-  <img src="../../docs/images/parity-app/03-sheet-status.png" width="250" alt="Status tab" />
-  <img src="../../docs/images/parity-app/04-sheet-setup.png" width="250" alt="Setup tab" />
-  <img src="../../docs/images/parity-app/07-sheet-tests.png" width="250" alt="Tests tab" />
+  <img src="../../docs/images/example-app/03-sheet-status.png" width="250" alt="Status tab" />
+  <img src="../../docs/images/example-app/04-sheet-setup.png" width="250" alt="Setup tab" />
+  <img src="../../docs/images/example-app/07-sheet-tests.png" width="250" alt="Tests tab" />
 </p>
 
 ## Running it
@@ -65,7 +65,7 @@ inspector, with swipeable tabs:
 # from the repo root: build + pack endura, install into the app
 npm run build && npm pack --pack-destination /tmp
 cp /tmp/endura-0.1.0.tgz ./endura-0.1.0.tgz
-cd examples/parity-app
+cd examples/example-app
 npm install
 npx expo start
 ```

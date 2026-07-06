@@ -142,17 +142,17 @@ That's it! The workflow will:
 
 ## See It Running
 
-The [showcase app](./examples/parity-app) (`examples/parity-app`) runs the real engine on your phone: a swipeable deck of use-case cards — each explains one guarantee, shows the code, and runs it against real SQLite and real HTTP — plus a draggable engine inspector docked at the bottom of the screen.
+The [example app](./examples/example-app) (`examples/example-app`) runs the real engine on your phone: a swipeable deck of use-case cards — each explains one guarantee, shows the code, and runs it against real SQLite and real HTTP — plus a draggable engine inspector docked at the bottom of the screen.
 
 <p align="center">
-  <img src="./docs/images/parity-app/01-deck.png" width="235" alt="Use-case card deck with live engine bar" />
-  <img src="./docs/images/parity-app/02-duty-card.png" width="235" alt="App-state gating card holding jobs while off duty" />
-  <img src="./docs/images/parity-app/05-sheet-jobs.png" width="235" alt="Engine inspector: every job grouped by phase" />
+  <img src="./docs/images/example-app/01-deck.png" width="235" alt="Use-case card deck with live engine bar" />
+  <img src="./docs/images/example-app/02-duty-card.png" width="235" alt="App-state gating card holding jobs while off duty" />
+  <img src="./docs/images/example-app/05-sheet-jobs.png" width="235" alt="Engine inspector: every job grouped by phase" />
 </p>
 <p align="center">
-  <img src="./docs/images/parity-app/04-sheet-setup.png" width="235" alt="Registered workflows read live from the definitions" />
-  <img src="./docs/images/parity-app/06-job-detail.png" width="235" alt="Job drill-in: execution, pipeline, payloads, history" />
-  <img src="./docs/images/parity-app/07-sheet-tests.png" width="235" alt="The 15-scenario parity suite, runnable on device" />
+  <img src="./docs/images/example-app/04-sheet-setup.png" width="235" alt="Registered workflows read live from the definitions" />
+  <img src="./docs/images/example-app/06-job-detail.png" width="235" alt="Job drill-in: execution, pipeline, payloads, history" />
+  <img src="./docs/images/example-app/07-sheet-tests.png" width="235" alt="The 15-scenario parity suite, runnable on device" />
 </p>
 
 The inspector's **Tests** tab runs the 15-scenario parity suite — crashes, connectivity loss, duplicate background wakes, stale results — live on the device against real SQLite.

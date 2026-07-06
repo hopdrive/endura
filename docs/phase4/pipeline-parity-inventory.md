@@ -15,7 +15,7 @@ Classification legend (from the review):
 - **Do Not Carry Forward** — old behavior intentionally retired (each has a documented reason)
 
 Scenario numbers refer to the review's "Required Expo Mobile Scenarios" (1–14),
-implemented in `examples/parity-app`.
+implemented in `examples/example-app`.
 
 ## Inventory
 
@@ -135,7 +135,7 @@ needs sign-off before being declared retired. Sources:
 
 - [x] Inventory complete (30 pipelines — the review's 27 plus geofenceEventSync, outcomeStatusSync, promoSync found in-repo)
 - [x] Every Must Match pipeline mapped to a scenario
-- [x] Scenarios implemented (tracked in `examples/parity-app`)
+- [x] Scenarios implemented (tracked in `examples/example-app`)
 - [x] iOS + Android simulator passes
 - [x] Issue catalog updated with Phase 4 findings
 
@@ -149,7 +149,7 @@ expo-sqlite persistence, one database file per scenario.
 | - | ---- | ------ | -------- |
 | 1 | Pipeline inventory complete | PASS | This document — 30 pipelines, tiers, payload keys, recovery flags |
 | 2 | Every Must Match pipeline has a mapped scenario or documented replacement decision | PASS | §Inventory mapping column; Do-Not-Carry-Forward table above for retired behaviors |
-| 3 | All required scenario categories implemented | PASS | Scenarios 1–14 in `examples/parity-app/src/scenarios/` (+ scenario 0 harness self-test) |
+| 3 | All required scenario categories implemented | PASS | Scenarios 1–14 in `examples/example-app/src/scenarios/` (+ scenario 0 harness self-test) |
 | 4 | All scenarios pass in the iOS simulator | PASS | RUN ALL green, all 15 scenarios, 2026-07-06 |
 | 5 | All scenarios pass in the Android simulator | PASS | RUN ALL green, all 15 scenarios, 2026-07-06 |
 | 6 | Photo pipeline parity | PASS | Scenario 1 (6-stage, per-stage payload accumulation, crash/restart mid-pipeline) |

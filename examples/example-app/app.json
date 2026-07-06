@@ -1,0 +1,30 @@
+{
+  "expo": {
+    "name": "Endura Example App",
+    "slug": "endura-example-app",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "platforms": [
+      "ios",
+      "android"
+    ],
+    "plugins": [
+      "expo-sqlite"
+    ],
+    "runtimeVersion": {
+      "policy": "sdkVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/f5d00901-6f91-48e9-9d84-f8048dac1824"
+    },
+    "android": {},
+    "ios": {},
+    "extra": {
+      "eas": {
+        "projectId": "f5d00901-6f91-48e9-9d84-f8048dac1824"
+      }
+    },
+    "owner": "robnewton"
+  }
+}
