@@ -57,7 +57,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
     "lint": "eslint src tests --ext .ts,.tsx --max-warnings 0",
     "clean": "rm -rf dist",
     "prepare": "husky"

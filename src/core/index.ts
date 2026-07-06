@@ -59,6 +59,9 @@ export {
 // Definitions
 export { defineActivity, defineWorkflow, DefineActivityOptions, DefineWorkflowOptions } from './definitions';
 
+// Typed step chaining
+export { chain, StepChain } from './chain';
+
 // Conditions
 export { conditions, always, whenConnected, whenDisconnected, afterDelay, all, any, not } from './conditions';
 

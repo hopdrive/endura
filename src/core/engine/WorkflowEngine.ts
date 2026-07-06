@@ -914,7 +914,17 @@ export class WorkflowEngine {
       });
     }
 
-    // Merge result into workflow state
+    // Merge result into workflow state. mergeState drops non-object
+    // results by contract — but never silently, or the author only
+    // finds out via a missing state key several steps later (L4).
+    const rawResult: unknown = result;
+    if (rawResult !== undefined && rawResult !== null && typeof rawResult !== 'object') {
+      this.logger.warn('Activity returned a non-object result; it was dropped from workflow state', {
+        runId: execution.runId,
+        activityName: completedTask.activityName,
+        resultType: typeof rawResult,
+      });
+    }
     const newState = mergeState(execution.state, result);
 
     // Locate the completed activity by NAME in the CURRENT definition.

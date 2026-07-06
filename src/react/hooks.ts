@@ -237,24 +237,20 @@ export function useExecutionStats(
  * @param engine - The workflow engine
  * @returns Object with startWorkflow function and current execution
  */
-export function useWorkflowStarter<TInput>(engine: WorkflowEngine) {
+export function useWorkflowStarter<TInput extends Record<string, unknown> = Record<string, unknown>>(
+  engine: WorkflowEngine
+) {
   const [execution, setExecution] = useState<WorkflowExecution | null>(null);
   const [isStarting, setIsStarting] = useState(false);
   const [error, setError] = useState<Error | null>(null);
 
   const startWorkflow = useCallback(
-    async (
-      workflow: { name: string; activities: unknown[] },
-      options: { input: TInput; uniqueKey?: string }
-    ) => {
+    async (workflow: Workflow<TInput>, options: StartWorkflowOptions<TInput>) => {
       setIsStarting(true);
       setError(null);
 
       try {
-        const exec = await engine.start(
-          workflow as unknown as Workflow<Record<string, unknown>>,
-          options as unknown as StartWorkflowOptions<Record<string, unknown>>
-        );
+        const exec = await engine.start(workflow, options);
         setExecution(exec);
         return exec;
       } catch (err) {
