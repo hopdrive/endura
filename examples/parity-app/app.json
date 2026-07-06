@@ -4,7 +4,24 @@
     "slug": "parity-app",
     "version": "1.0.0",
     "orientation": "portrait",
-    "userInterfaceStyle": "dark",
-    "plugins": ["expo-sqlite"]
+    "userInterfaceStyle": "light",
+    "platforms": ["ios", "android"],
+    "plugins": [
+      "expo-sqlite"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "356a2126-30ee-41f5-b597-4e00ce657c74"
+      }
+    },
+    "owner": "robnewton",
+    "runtimeVersion": {
+      "policy": "sdkVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/356a2126-30ee-41f5-b597-4e00ce657c74"
+    },
+    "android": {},
+    "ios": {}
   }
 }
