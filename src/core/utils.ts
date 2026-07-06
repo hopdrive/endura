@@ -97,6 +97,17 @@ export function mergeState(
 }
 
 /**
+ * Approximate serialized size of a value: the length of its JSON string
+ * (exact bytes for ASCII payloads, an underestimate for multi-byte
+ * characters). Cheap enough to run per advance; used for the state-size
+ * guardrails, not for accounting.
+ */
+export function approxJsonBytes(value: unknown): number {
+  const json = JSON.stringify(value);
+  return json === undefined ? 0 : json.length;
+}
+
+/**
  * Create an AbortController-like API that works in Node.
  */
 export function createAbortController(): {

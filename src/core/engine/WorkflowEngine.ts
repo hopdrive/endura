@@ -29,7 +29,14 @@ import {
   TaskErrorHistoryEntry,
   ExecutionQuery,
 } from '../types';
-import { generateId, mergeState, calculateBackoffDelay, silentLogger, createAbortController } from '../utils';
+import {
+  generateId,
+  mergeState,
+  calculateBackoffDelay,
+  silentLogger,
+  createAbortController,
+  approxJsonBytes,
+} from '../utils';
 import { conditions } from '../conditions';
 
 // Default activity options
@@ -49,6 +56,9 @@ const HELD_TASK_RECHECK_DELAY = 60000;
 // Recheck cadence for tasks skipped by runWhen when the condition gives
 // no retryInMs hint.
 const DEFAULT_SKIP_RESCHEDULE_DELAY = 30000;
+// Serialized-size threshold above which oversized results/state warn.
+// State is rewritten on every advance, so big payloads tax the whole run.
+const DEFAULT_STATE_SIZE_WARN_BYTES = 64 * 1024;
 // Bound on per-task error history — oldest entries drop first. Keeps
 // long-retrying offline tasks from growing their row on every attempt.
 const MAX_ERROR_HISTORY = 20;
@@ -84,6 +94,7 @@ export class WorkflowEngine {
   // foreground app vs background wake) gets its own.
   private ownerId: string = generateId();
   private leaseDurationMs: number;
+  private stateSizeWarnBytes: number;
 
   // Track active AbortControllers by runId for cancellation propagation
   private activeAbortControllers: Map<string, { abort: (reason?: unknown) => void }> = new Map();
@@ -97,6 +108,7 @@ export class WorkflowEngine {
     this.onEvent = config.onEvent;
     this.cleanup = config.cleanup;
     this.leaseDurationMs = config.leaseDurationMs ?? DEFAULT_LEASE_MS;
+    this.stateSizeWarnBytes = config.stateSizeWarnBytes ?? DEFAULT_STATE_SIZE_WARN_BYTES;
   }
 
   /**
@@ -926,6 +938,33 @@ export class WorkflowEngine {
       });
     }
     const newState = mergeState(execution.state, result);
+
+    // Size guardrails (M3): state is rewritten on every advance, so an
+    // oversized output taxes the rest of the run. Warn per offending
+    // result (actionable — store a reference, not the payload), and once
+    // when the merged state first crosses the threshold.
+    if (result && typeof result === 'object') {
+      const resultBytes = approxJsonBytes(result);
+      if (resultBytes > this.stateSizeWarnBytes) {
+        this.logger.warn(
+          'Large activity result — store a reference (file path, row id), not the payload',
+          {
+            runId: execution.runId,
+            activityName: completedTask.activityName,
+            approxBytes: resultBytes,
+            thresholdBytes: this.stateSizeWarnBytes,
+          }
+        );
+      }
+    }
+    const newStateBytes = approxJsonBytes(newState);
+    if (newStateBytes > this.stateSizeWarnBytes && approxJsonBytes(execution.state) <= this.stateSizeWarnBytes) {
+      this.logger.warn('Workflow state exceeds the recommended size and is rewritten on every advance', {
+        runId: execution.runId,
+        approxBytes: newStateBytes,
+        thresholdBytes: this.stateSizeWarnBytes,
+      });
+    }
 
     // Locate the completed activity by NAME in the CURRENT definition.
     // The persisted index belongs to the definition that scheduled the

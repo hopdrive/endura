@@ -85,6 +85,7 @@ export {
   setIdGenerator,
   calculateBackoffDelay,
   mergeState,
+  approxJsonBytes,
   createAbortController,
   silentLogger,
   consoleLogger,
