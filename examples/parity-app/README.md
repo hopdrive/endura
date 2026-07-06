@@ -1,40 +1,63 @@
-# Endura Showcase / Parity Harness
+# Endura Showcase App
 
-An Expo app that is both **documentation and evidence** for Endura. It runs the
-real engine against real SQLite files on your device and proves — with
-assertions you can rerun — that durable workflows survive the failure modes
-that break hand-rolled queues.
+An Expo app that is both **documentation and evidence** for Endura. Everything
+in it is real: real SQLite persistence, real HTTP deliveries to the real
+internet, the device's real radio. Nothing that the phone can do itself is
+simulated — you test offline behavior with actual Airplane Mode and durability
+with an actual force quit.
 
-## Tabs
+<p align="center">
+  <img src="../../docs/images/parity-app/01-deck.png" width="250" alt="Use-case card deck" />
+  <img src="../../docs/images/parity-app/02-duty-card.png" width="250" alt="Duty-gated card holding jobs" />
+  <img src="../../docs/images/parity-app/05-sheet-jobs.png" width="250" alt="Engine inspector jobs tab" />
+</p>
 
-- **Learn** — what Endura is, why the evidence here is trustworthy, and a
-  concept glossary (workflows, ticks, runWhen holds, leases, uniqueKey, DLQ,
-  priorities, upgrade skew…). Every concept shows the minimal code and links to
-  the scenario where you can watch it happen.
-- **Lab (Scenarios)** — the 15 Phase-4 parity scenarios as teaching cards,
-  deliberately SIMULATED so they are deterministic and automatable. Each card
-  leads with the skeptic's question it answers ("What happens to a six-stage
-  photo upload when the app is killed at stage three?"), narrates the engine
-  live while it runs, then shows steps, assertions, the business-effect ledger
-  (the anti-duplicate proof), and a CODE view with the sample code + file
-  structure you would use in a real app.
-- **Field Test** — the UN-simulated counterpart, built for a physical phone:
-  a production-style engine (real tick loop) over a database that is never
-  reset between launches, real connectivity from the radio (expo-network),
-  and real HTTP deliveries to the real internet (postman-echo.com by default, or
-  paste a webhook.site URL and watch jobs land on your laptop). Guided
-  missions: baseline delivery → airplane-mode hold & priority flush →
-  backgrounding → force quit & relaunch → real server 500s driving real
-  retries into the DLQ and back out via force retry.
-- **Playground** — a live simulated engine driven by hand: start jobs, tick,
-  toggle connectivity, restart, background-wake a second engine, inject
-  failures (transient / refusal / hung / slow / late), and rescue dead
-  letters — with viewers over every table the engine persists.
+## The card deck
 
-A fixed-geometry **engine instrument panel** is pinned to the bottom of every
-tab: which engine is live, real online/offline state, four KPI counters
-(queued / running / dead-lettered / delivered), and a ticker narrating the
-engine's last action.
+The main surface is a horizontally swipeable deck. Each card explains one
+guarantee in plain English, shows the code that provides it, and has a button
+that runs it for real:
+
+1. **Meet Endura** — the whole idea in one screen; queue your first delivery.
+2. **Survives Offline** — gated jobs hold (attempts frozen) in Airplane Mode
+   and flush on reconnect. Force-quit mid-queue; nothing is lost.
+3. **Retries, Automatically** — sends to an endpoint that genuinely returns
+   HTTP 500 half the time; watch backoff absorb a misbehaving server.
+4. **Multi-Step Pipelines** — prepare → upload → finalize; each stage's return
+   value feeds the next, resumable between stages.
+5. **Gated by App State** — `runWhen` is plain code, so jobs can wait on
+   anything the app knows; the on-duty switch holds and releases duty reports.
+6. **Priority Lanes** — queued backwards, delivered by priority.
+7. **Exactly Once** — mash the button; `uniqueKey` dedupes at the database.
+8. **When All Else Fails** — a doomed job burns 3 real attempts and lands in
+   the dead-letter queue with its full history, ready for manual retry.
+
+## The engine inspector
+
+A status bar with live queue counters is docked at the bottom. Drag it up
+(it's a standard bottom sheet — it follows your finger) for the full
+inspector, with swipeable tabs:
+
+- **Status** — engine state, the radio as the device reports it, the on-duty
+  app-state switch, the delivery endpoint (paste a webhook.site URL to watch
+  your phone's deliveries land on a laptop), queue counts, and reset.
+- **Setup** — every registered workflow and activity with its priority, retry
+  policy, timeout, and gating — read live from the definitions.
+- **Jobs** — every job the engine persists, grouped by phase (running,
+  retrying, held, waiting, dead, completed), with a drill-in detail view:
+  payload, accumulated state, pipeline trail, task lease, and the verbatim
+  error/hold history of every attempt. Dead letters can be retried; running
+  jobs cancelled.
+- **Log** — the engine narrating itself.
+- **Tests** — the 15-scenario parity suite (crashes, connectivity loss,
+  duplicate background wakes, stale results…), each run live against real
+  SQLite on this device.
+
+<p align="center">
+  <img src="../../docs/images/parity-app/03-sheet-status.png" width="250" alt="Status tab" />
+  <img src="../../docs/images/parity-app/04-sheet-setup.png" width="250" alt="Setup tab" />
+  <img src="../../docs/images/parity-app/07-sheet-tests.png" width="250" alt="Tests tab" />
+</p>
 
 ## Running it
 
@@ -47,10 +70,22 @@ npm install
 npx expo start
 ```
 
-Open in Expo Go (iOS or Android). Each scenario owns an isolated database
-file, so runs are deterministic; RESET deletes the file.
+Open in Expo Go (iOS or Android).
 
-## Why the fake server matters
+### Without a dev server (field testing)
+
+Airplane-mode and force-quit tests can't depend on Metro — a dev bundle can't
+be re-fetched while offline. Publish the bundle instead and Expo Go loads it
+from the CDN and relaunches it from its cache:
+
+```bash
+npx eas-cli update --branch demo --message "field build"
+```
+
+Open the update once from the EAS dashboard QR; after that it launches
+without the computer.
+
+## Why the parity suite matters
 
 Scenarios never assert "the workflow completed". They assert on a **business
 effect ledger** — one uploaded photo, one submitted outcome — recorded by a

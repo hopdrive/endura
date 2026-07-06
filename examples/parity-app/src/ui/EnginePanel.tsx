@@ -75,10 +75,13 @@ export const PANEL_COLLAPSED_HEIGHT = 132;
 export function EnginePanel({
   session,
   inspection,
+  onDuty,
   onDutyChanged,
 }: {
   session: DemoEngineSession;
   inspection: EngineInspection | null;
+  /** Live duty state, owned by the app (single source of truth). */
+  onDuty: boolean;
   /** Lets the app re-render anything else showing duty state. */
   onDutyChanged?: () => void;
 }) {
@@ -102,8 +105,6 @@ export function EnginePanel({
   const delivered = counts?.completed ?? 0;
   const dead = counts ? counts.dead + counts.failed : 0;
   const online = session.isOnline();
-  const onDuty = session.isOnDuty();
-
   const selectedJob = selectedRun ? inspection?.jobs.find(job => job.runId === selectedRun) : undefined;
 
   return (
@@ -173,7 +174,7 @@ export function EnginePanel({
       >
         <View key="status" style={styles.page}>
           <BottomSheetScrollView contentContainerStyle={styles.sheetContent}>
-            <StatusTab session={session} inspection={inspection} onDutyChanged={onDutyChanged} />
+            <StatusTab session={session} inspection={inspection} onDuty={onDuty} onDutyChanged={onDutyChanged} />
           </BottomSheetScrollView>
         </View>
         <View key="setup" style={styles.page}>
@@ -223,13 +224,14 @@ function Kpi({ value, label, tone }: { value: number; label: string; tone?: stri
 function StatusTab({
   session,
   inspection,
+  onDuty,
   onDutyChanged,
 }: {
   session: DemoEngineSession;
   inspection: EngineInspection | null;
+  onDuty: boolean;
   onDutyChanged?: () => void;
 }) {
-  const [onDuty, setOnDuty] = useState(session.isOnDuty());
   const [endpointDraft, setEndpointDraft] = useState(session.endpoint);
   const [resetting, setResetting] = useState(false);
   const counts = inspection?.counts;
@@ -237,7 +239,6 @@ function StatusTab({
   const toggleDuty = useCallback(
     (value: boolean) => {
       session.setOnDuty(value);
-      setOnDuty(value);
       onDutyChanged?.();
     },
     [session, onDutyChanged]

@@ -136,7 +136,12 @@ export default function App() {
           </View>
         </View>
 
-        <EnginePanel session={session} inspection={inspection} onDutyChanged={() => setOnDuty(session.isOnDuty())} />
+        <EnginePanel
+          session={session}
+          inspection={inspection}
+          onDuty={onDuty}
+          onDutyChanged={() => setOnDuty(session.isOnDuty())}
+        />
       </SafeAreaView>
     </GestureHandlerRootView>
   );
