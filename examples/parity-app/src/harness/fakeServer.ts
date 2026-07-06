@@ -145,6 +145,17 @@ export class FakeServer {
     const behavior = this.scripts.get(request.endpoint)?.shift() ?? { kind: 'success' as const };
 
     const succeed = (late: boolean) => {
+      // Idempotency is enforced at commit time too: a late-resolving
+      // call whose key was already committed by a retry is absorbed
+      // without a second business effect (real server guard semantics).
+      if (request.idempotencyKey !== undefined) {
+        const idemKey = `${request.endpoint}::${request.idempotencyKey}`;
+        if (this.idempotency.has(idemKey)) {
+          record('duplicate-absorbed');
+          return;
+        }
+        this.idempotency.set(idemKey, { ok: true });
+      }
       this.effects.push({
         kind: request.effect.kind,
         key: request.effect.key,
@@ -153,9 +164,6 @@ export class FakeServer {
         late: late || undefined,
         details: request.effect.details,
       });
-      if (request.idempotencyKey !== undefined) {
-        this.idempotency.set(`${request.endpoint}::${request.idempotencyKey}`, { ok: true });
-      }
     };
 
     switch (behavior.kind) {
