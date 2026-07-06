@@ -112,7 +112,7 @@ export const upgradePendingWork: ParityScenario<ParityClient> = {
         'pending, recheck ~60s out, attempts 0',
         task && { status: task.status, recheckInMs: (task.scheduledFor ?? 0) - Date.now(), attempts: task.attempts });
       t.assertEqual('NOT dead-lettered', 0, (await ctx.client.engine.getDeadLetters()).length);
-      const heldLogs = ctx.client.parityLogs.filter(line => /held/i.test(line));
+      const heldLogs = ctx.client.parityLogs.filter(line => /holding task|activity:held/i.test(line));
       t.assert('hold is visible in engine logs/events', heldLogs.length >= 1, '>= 1 held log', heldLogs.slice(-2));
     });
 
