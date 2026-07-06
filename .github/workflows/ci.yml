@@ -34,6 +34,11 @@ jobs:
       - name: Run linting
         run: npm run lint
 
+      - name: Build package
+        run: npm run build
+
+      # Coverage thresholds (80/70/80/80) are enforced by vitest inside
+      # this step — it fails the job when any floor is missed.
       - name: Run tests with coverage
         run: npm run test:coverage
 
@@ -43,16 +48,4 @@ jobs:
           name: coverage-report-${{ matrix.node-version }}
           path: coverage/
           retention-days: 7
-
-      - name: Coverage check (PR only)
-        if: github.event_name == 'pull_request'
-        run: |
-          echo "## Coverage Report" >> $GITHUB_STEP_SUMMARY
-          echo "Coverage thresholds must be met for PR to be merged." >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Current thresholds:" >> $GITHUB_STEP_SUMMARY
-          echo "- Statements: 80%" >> $GITHUB_STEP_SUMMARY
-          echo "- Branches: 70%" >> $GITHUB_STEP_SUMMARY
-          echo "- Functions: 80%" >> $GITHUB_STEP_SUMMARY
-          echo "- Lines: 80%" >> $GITHUB_STEP_SUMMARY
 

@@ -110,22 +110,26 @@ export async function createTestContext(
  * Options for running a workflow to completion.
  */
 export interface RunOptions {
-  /** Maximum time to wait in ms (default: 5000) */
-  timeout?: number;
-  /** Time between ticks in ms (default: 10) */
-  tickInterval?: number;
-  /** If true, advances mock clock to handle gated activities */
+  /** Maximum engine ticks before giving up (default: 500) */
+  maxTicks?: number;
+  /** If true, advances mock clock each tick to handle gated activities */
   advanceClock?: boolean;
+  /** Mock-clock advance per tick when advanceClock is set (default: 35000, past the 30s skip-reschedule delay) */
+  advanceMs?: number;
 }
 
 /**
  * Runs the engine until a workflow completes, fails, or is cancelled.
  *
+ * Deterministic: drives the engine with a bounded tick loop and the
+ * injected MockClock only — no wall-clock reads, no real timers — so it
+ * cannot flake under CI load and works under vitest fake timers.
+ *
  * @param ctx - The test context
  * @param runId - The workflow execution ID
  * @param options - Execution options
  * @returns The final execution state
- * @throws If the workflow doesn't complete within the timeout
+ * @throws If the workflow doesn't settle within the tick budget
  *
  * @example
  * ```typescript
@@ -139,13 +143,12 @@ export async function runToCompletion(
   runId: string,
   options?: RunOptions
 ): Promise<WorkflowExecution> {
-  const { timeout = 5000, tickInterval = 10, advanceClock = false } = options ?? {};
-  const start = Date.now();
+  const { maxTicks = 500, advanceClock = false, advanceMs = 35000 } = options ?? {};
 
-  while (Date.now() - start < timeout) {
-    // Advance mock clock if needed (for gated activities)
+  for (let tick = 0; tick < maxTicks; tick++) {
+    // Advance mock clock if needed (for gated/backoff-delayed activities)
     if (advanceClock) {
-      ctx.clock.advance(35000); // Past default 30s gating delay
+      ctx.clock.advance(advanceMs);
     }
 
     await ctx.engine.tick();
@@ -158,11 +161,9 @@ export async function runToCompletion(
     if (execution.status !== 'running') {
       return execution;
     }
-
-    await sleep(tickInterval);
   }
 
-  throw new Error(`Workflow ${runId} did not complete within ${timeout}ms`);
+  throw new Error(`Workflow ${runId} did not settle within ${maxTicks} ticks`);
 }
 
 // =============================================================================
@@ -258,39 +259,14 @@ export function createTestActivity(
 // =============================================================================
 
 /**
- * Sleep for a specified duration.
+ * Sleep for a specified duration of REAL time.
+ *
+ * Not for pacing the harness — runToCompletion is tick-driven. Use this
+ * only inside activity bodies that simulate genuinely slow handlers
+ * (timeout/cancellation tests race real promises).
  *
  * @param ms - Duration in milliseconds
  */
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/**
- * Wait for a condition to become true.
- *
- * @param condition - Function that returns true when condition is met
- * @param options - Wait options
- * @throws If condition is not met within timeout
- *
- * @example
- * ```typescript
- * await waitFor(() => results.length > 0, { timeout: 1000 });
- * ```
- */
-export async function waitFor(
-  condition: () => boolean | Promise<boolean>,
-  options?: { timeout?: number; interval?: number }
-): Promise<void> {
-  const { timeout = 5000, interval = 50 } = options ?? {};
-  const start = Date.now();
-
-  while (Date.now() - start < timeout) {
-    if (await condition()) {
-      return;
-    }
-    await sleep(interval);
-  }
-
-  throw new Error(`Condition not met within ${timeout}ms`);
 }
