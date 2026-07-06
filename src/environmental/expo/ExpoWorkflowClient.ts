@@ -226,6 +226,10 @@ export class ExpoWorkflowClient {
     return this.engine.acknowledgeDeadLetter.bind(this.engine);
   }
 
+  get retryFromDeadLetter() {
+    return this.engine.retryFromDeadLetter.bind(this.engine);
+  }
+
   get purgeDeadLetters() {
     return this.engine.purgeDeadLetters.bind(this.engine);
   }

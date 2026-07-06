@@ -1116,6 +1116,105 @@ export class WorkflowEngine {
   }
 
   /**
+   * Redrive a dead-lettered task: reset it to pending with a fresh retry
+   * budget, re-open its execution at the same activity cursor, and remove
+   * the dead letter record. This is the "Force Retry" recovery path.
+   *
+   * Throws if the dead letter, its execution, or its task no longer
+   * exists, or if the execution's uniqueKey has since been claimed by
+   * another running execution. On throw, nothing is mutated.
+   *
+   * @returns the re-opened execution
+   */
+  async retryFromDeadLetter(deadLetterId: string): Promise<WorkflowExecution> {
+    const now = this.clock.now();
+
+    const deadLetters = await this.storage.getDeadLetters();
+    const deadLetter = deadLetters.find(dl => dl.id === deadLetterId);
+    if (!deadLetter) {
+      throw new Error(`Dead letter not found: ${deadLetterId}`);
+    }
+
+    const execution = await this.storage.getExecution(deadLetter.runId);
+    if (!execution) {
+      throw new Error(
+        `Cannot redrive dead letter ${deadLetterId}: execution ${deadLetter.runId} no longer exists`
+      );
+    }
+
+    const task = await this.storage.getActivityTask(deadLetter.taskId);
+    if (!task) {
+      throw new Error(
+        `Cannot redrive dead letter ${deadLetterId}: task ${deadLetter.taskId} no longer exists`
+      );
+    }
+
+    const revivedExecution: WorkflowExecution = {
+      ...execution,
+      status: 'running',
+      error: undefined,
+      failedActivityName: undefined,
+      completedAt: undefined,
+      updatedAt: now,
+    };
+
+    // Fresh retry budget: failures drives exhaustion; attempts stays as
+    // the historical claim count.
+    const revivedTask: ActivityTask = {
+      ...task,
+      status: 'pending',
+      failures: 0,
+      scheduledFor: undefined,
+      startedAt: undefined,
+      completedAt: undefined,
+      error: undefined,
+      errorStack: undefined,
+      ownerId: undefined,
+      leaseExpiresAt: undefined,
+    };
+
+    // Key reservation, task reset, execution re-open, and dead-letter
+    // removal must commit atomically — a partial write recreates exactly
+    // the stranded shapes the C2 fix eliminated.
+    await this.storage.transaction(async () => {
+      if (execution.uniqueKey) {
+        const reserved = await this.storage.setUniqueKey(
+          execution.workflowName,
+          execution.uniqueKey,
+          execution.runId
+        );
+        if (!reserved) {
+          throw new Error(
+            `Cannot redrive dead letter ${deadLetterId}: uniqueKey '${execution.uniqueKey}' is held by another running execution`
+          );
+        }
+      }
+
+      await this.storage.saveActivityTask(revivedTask);
+      await this.storage.saveExecution(revivedExecution);
+      await this.storage.deleteDeadLetter(deadLetterId);
+    });
+
+    this.emitEvent({
+      type: 'deadletter:redriven',
+      timestamp: now,
+      runId: deadLetter.runId,
+      taskId: deadLetter.taskId,
+      activityName: deadLetter.activityName,
+      workflowName: deadLetter.workflowName,
+    });
+
+    this.logger.info('Redrove dead letter', {
+      deadLetterId,
+      runId: deadLetter.runId,
+      taskId: deadLetter.taskId,
+      activityName: deadLetter.activityName,
+    });
+
+    return revivedExecution;
+  }
+
+  /**
    * Purge dead letter records.
    */
   async purgeDeadLetters(options: { olderThanMs: number; acknowledgedOnly?: boolean }): Promise<number> {

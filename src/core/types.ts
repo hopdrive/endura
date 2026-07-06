@@ -316,7 +316,8 @@ export type EngineEventType =
   | 'activity:completed'
   | 'activity:failed'
   | 'activity:skipped'
-  | 'deadletter:added';
+  | 'deadletter:added'
+  | 'deadletter:redriven';
 
 export interface EngineEvent {
   type: EngineEventType;
