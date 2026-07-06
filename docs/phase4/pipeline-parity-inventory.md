@@ -135,6 +135,40 @@ needs sign-off before being declared retired. Sources:
 
 - [x] Inventory complete (30 pipelines — the review's 27 plus geofenceEventSync, outcomeStatusSync, promoSync found in-repo)
 - [x] Every Must Match pipeline mapped to a scenario
-- [ ] Scenarios implemented (tracked in `examples/parity-app`)
-- [ ] iOS + Android simulator passes
-- [ ] Issue catalog updated with Phase 4 findings
+- [x] Scenarios implemented (tracked in `examples/parity-app`)
+- [x] iOS + Android simulator passes
+- [x] Issue catalog updated with Phase 4 findings
+
+## Success Gates (review §Phase 4)
+
+Verified 2026-07-06. Device runs: iPhone 16 simulator (iOS 18.3) and
+Pixel 2 emulator (Android 14 / API 34), Expo Go SDK 57, real
+expo-sqlite persistence, one database file per scenario.
+
+| # | Gate | Status | Evidence |
+| - | ---- | ------ | -------- |
+| 1 | Pipeline inventory complete | PASS | This document — 30 pipelines, tiers, payload keys, recovery flags |
+| 2 | Every Must Match pipeline has a mapped scenario or documented replacement decision | PASS | §Inventory mapping column; Do-Not-Carry-Forward table above for retired behaviors |
+| 3 | All required scenario categories implemented | PASS | Scenarios 1–14 in `examples/parity-app/src/scenarios/` (+ scenario 0 harness self-test) |
+| 4 | All scenarios pass in the iOS simulator | PASS | RUN ALL green, all 15 scenarios, 2026-07-06 |
+| 5 | All scenarios pass in the Android simulator | PASS | RUN ALL green, all 15 scenarios, 2026-07-06 |
+| 6 | Photo pipeline parity | PASS | Scenario 1 (6-stage, per-stage payload accumulation, crash/restart mid-pipeline) |
+| 7 | Outcome draft sync parity | PASS | Scenario 2 (non-deduped convergence) |
+| 8 | Outcome submit parity | PASS | Scenario 3 (no double-submit across restart; pipeline-prefixed stage names per P4-001) |
+| 9 | Move sync permanent failure + force retry parity | PASS | Scenario 4 (refusal → DLQ → force retry, exactly one final effect) |
+| 10 | Offer bundle per-entity dedupe parity | PASS | Scenario 7 (uniqueKey by offerId; racing starts collapse — engine fix P4-003) |
+| 11 | Offline hold and offline mid-stage | PASS | Scenarios 8 + 9 (held not failed, attempts not burned; drop during push, resume at push — engine fix P4-005) |
+| 12 | Foreground/background collision before background execution enabled | PASS | Scenario 10 (lease protects the active task; second engine absorbs, no duplicate effects) |
+| 13 | App upgrade with pending work | PASS | Scenario 12 (unknown activity held ~60s, never dead-lettered; hotfix resumes; compatible insert continues by name) |
+| 14 | Recovery age gate + non-recoverable workflow behavior | PASS | Scenarios 5 + 6 (7-day window, includeStale bypass; fail once, never re-armed) |
+| 15 | Fake server shows no unintended duplicate business effects | PASS | Effect-count-by-key assertions in every scenario; RUN ALL exports confirm one effect per business key |
+| 16 | Phase 4 failures added to the issue catalog with severity | PASS | `docs/phase4/issue-catalog.md` — P4-001…P4-005 (2 fixed in-phase, 3 open follow-ups) |
+
+Required harness capabilities (review §Required Expo Harness
+Capabilities): scenario list/detail, run, run-all, reset, and JSON
+export are the main screen; persisted SQLite state viewer, execution /
+task / dead-letter viewers (with per-row force retry), connectivity
+toggle, background wake, app-restart simulation, failure injection
+controls, and the fake server viewer live in the INSPECTOR panel
+(`src/harness/inspector.ts` + `src/InspectorPanel.tsx`), which runs
+against its own playground database.
