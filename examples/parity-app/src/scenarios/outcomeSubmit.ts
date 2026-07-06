@@ -47,10 +47,17 @@ function rowOf(localId: string): LocalOutcomeRow {
   return row;
 }
 
-/** Stage makers — the driver app's workers are byte-for-byte siblings across the two chains; only names differ. */
-function makeStage1(ctx: ParityContext<ParityClient>, tag: string) {
+/**
+ * Stage makers — the driver app's workers are byte-for-byte siblings
+ * across the two chains; only names differ. The pipeline-prefixed names
+ * (`outcomeSubmit.stage1CreateDraft` vs
+ * `outcomeWorkflowDataSync.stage1CreateDraft`) are load-bearing parity:
+ * both RNQ and endura resolve workers/activities in a global namespace,
+ * so same-named stages across chains silently cross-wire (issue P4-001).
+ */
+function makeStage1(ctx: ParityContext<ParityClient>, tag: string, prefix: string) {
   return defineActivity({
-    name: 'stage1CreateDraft',
+    name: `${prefix}.stage1CreateDraft`,
     retry: { maximumAttempts: 10, initialInterval: 300 },
     runWhen: rc => (rc.isConnected ? { ready: true } : { ready: false, reason: 'offline' }),
     execute: async a => {
@@ -69,9 +76,9 @@ function makeStage1(ctx: ParityContext<ParityClient>, tag: string) {
   });
 }
 
-function makeStage2(ctx: ParityContext<ParityClient>, tag: string) {
+function makeStage2(ctx: ParityContext<ParityClient>, tag: string, prefix: string) {
   return defineActivity({
-    name: 'stage2SyncWorkflowData',
+    name: `${prefix}.stage2SyncWorkflowData`,
     retry: { maximumAttempts: 10, initialInterval: 300 },
     runWhen: rc => (rc.isConnected ? { ready: true } : { ready: false, reason: 'offline' }),
     execute: async a => {
@@ -92,7 +99,7 @@ function makeStage2(ctx: ParityContext<ParityClient>, tag: string) {
 
 function makeStage3(ctx: ParityContext<ParityClient>) {
   return defineActivity({
-    name: 'stage3Submit',
+    name: 'outcomeSubmit.stage3Submit',
     retry: { maximumAttempts: 10, initialInterval: 300 },
     runWhen: rc => (rc.isConnected ? { ready: true } : { ready: false, reason: 'offline' }),
     execute: async a => {
@@ -136,14 +143,14 @@ function makeStage3(ctx: ParityContext<ParityClient>) {
 function buildSubmitWorkflow(ctx: ParityContext<ParityClient>): Workflow {
   return defineWorkflow({
     name: 'outcome.submit.parity',
-    activities: [makeStage1(ctx, 'submit'), makeStage2(ctx, 'submit'), makeStage3(ctx)],
+    activities: [makeStage1(ctx, 'submit', 'outcomeSubmit'), makeStage2(ctx, 'submit', 'outcomeSubmit'), makeStage3(ctx)],
   });
 }
 
 function buildMidfillWorkflow(ctx: ParityContext<ParityClient>): Workflow {
   return defineWorkflow({
     name: 'outcome.midfill.parity',
-    activities: [makeStage1(ctx, 'sync'), makeStage2(ctx, 'sync')],
+    activities: [makeStage1(ctx, 'sync', 'outcomeWorkflowDataSync'), makeStage2(ctx, 'sync', 'outcomeWorkflowDataSync')],
   });
 }
 

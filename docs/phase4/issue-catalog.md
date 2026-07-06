@@ -1,0 +1,11 @@
+# Phase 4 Issue Catalog
+
+Mismatches discovered while running the parity scenarios (review §Issue
+Catalog Additions). Severity rules: Critical = endura cannot safely
+replace production behavior; High = replacement needs a risky
+workaround; Medium = acceptable for a narrow pilot, not broad rollout;
+Low = cleanup / documentation / non-blocking parity gap.
+
+| ID | Severity | Area | Current Driver App Behavior | Endura Behavior | Production Risk | Required Fix | Scenario |
+| -- | -------- | ---- | --------------------------- | --------------- | --------------- | ------------ | -------- |
+| P4-001 | Medium | Activity registration | RNQ worker names are globally namespaced too, but every pipeline avoids collisions by convention: worker names carry the pipeline prefix (`outcomeSubmit.stage1CreateDraft` vs `outcomeWorkflowDataSync.stage1CreateDraft`), and the extraction notes the distinct names are load-bearing (they are what stops the queue from auto-advancing mid-fill sync into a submit stage). | `WorkflowEngine.registerWorkflow` rebuilds one global `activities: Map<name, Activity>` across ALL workflows (`WorkflowEngine.ts:270-275`). Same-named activities in two different workflows silently last-win — tasks for workflow A execute workflow B's closure. Only same-`workflow.name` re-registration logs a warning; cross-workflow activity collisions produce no signal. Task execution (`WorkflowEngine.ts:660,1159,1329`) resolves by bare activity name even though the task row knows its workflow. | A team porting two sibling pipelines (exactly the outcomeSubmit / outcomeWorkflowDataSync pair) with natural stage names gets silent cross-wiring: behavior diverges only where the closures differ, with no error, warning, or DLQ entry. Found because scenario 3's per-chain run counters landed under the wrong chain while every business assertion still passed. | Either (a) scope activity resolution per workflow — the task already carries `workflowName`, so resolve through `workflow.activities` as `advanceWorkflow` already does at `WorkflowEngine.ts:236` — or (b) throw (not warn) on cross-workflow activity-name collision at `registerWorkflow` time. (b) is the smaller change and matches the driver app's de-facto contract of globally unique stage names. | 3 |
