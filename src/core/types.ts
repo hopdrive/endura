@@ -199,8 +199,19 @@ export interface RunConditionResult {
 
 /**
  * A function that evaluates whether an activity should run.
+ * The engine injects `now` (its injected Clock) and `taskCreatedAt`
+ * alongside the runtime context so time-based conditions like
+ * afterDelay stay deterministic and testable.
  */
-export type RunConditionFn = (ctx: RuntimeContext & { input: Record<string, unknown> }) => RunConditionResult;
+export type RunConditionFn = (
+  ctx: RuntimeContext & {
+    input: Record<string, unknown>;
+    /** Current time per the engine's Clock */
+    now?: number;
+    /** When the evaluated task was created */
+    taskCreatedAt?: number;
+  }
+) => RunConditionResult;
 
 /**
  * Retry policy configuration.

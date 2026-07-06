@@ -44,6 +44,9 @@ const DEFAULT_LEASE_MS = 60000;
 // before re-checking. Long enough to avoid busy-spinning, short enough
 // that a hotfixed definition picks the task up promptly.
 const HELD_TASK_RECHECK_DELAY = 60000;
+// Recheck cadence for tasks skipped by runWhen when the condition gives
+// no retryInMs hint.
+const DEFAULT_SKIP_RESCHEDULE_DELAY = 30000;
 
 /**
  * The WorkflowEngine orchestrates workflow execution.
@@ -621,11 +624,20 @@ export class WorkflowEngine {
     // Check runWhen condition
     const runWhen: RunConditionFn = activity.options?.runWhen ?? conditions.always;
     const runtimeContext = this.environment.getRuntimeContext();
-    const conditionResult = runWhen({ ...runtimeContext, input: claimed.input });
+    const conditionResult = runWhen({
+      ...runtimeContext,
+      input: claimed.input,
+      now,
+      taskCreatedAt: claimed.createdAt,
+    });
 
     if (!conditionResult.ready) {
       // Skip task, schedule for later retry
-      await this.handleTaskSkipped(claimed, conditionResult.reason ?? 'Condition not met');
+      await this.handleTaskSkipped(
+        claimed,
+        conditionResult.reason ?? 'Condition not met',
+        conditionResult.retryInMs
+      );
       return true;
     }
 
@@ -1209,7 +1221,7 @@ export class WorkflowEngine {
   /**
    * Handle task skipped due to runWhen condition.
    */
-  private async handleTaskSkipped(task: ActivityTask, reason: string): Promise<void> {
+  private async handleTaskSkipped(task: ActivityTask, reason: string, retryInMs?: number): Promise<void> {
     const now = this.clock.now();
 
     // Sticky terminal states: don't resurrect task rows for an
@@ -1226,8 +1238,8 @@ export class WorkflowEngine {
 
     const activity = this.activities.get(task.activityName);
 
-    // Reschedule for later (default 30 seconds)
-    const delay = 30000;
+    // Reschedule at the condition's retryInMs hint, defaulting to 30s
+    const delay = retryInMs ?? DEFAULT_SKIP_RESCHEDULE_DELAY;
     const skippedTask: ActivityTask = {
       ...task,
       status: 'pending',

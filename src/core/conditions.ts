@@ -30,15 +30,28 @@ export const whenDisconnected: RunConditionFn = (ctx) => {
 };
 
 /**
- * Creates a condition that is ready after the activity has been pending for a given delay.
- * Note: This requires tracking when the task was created, which is available via task.createdAt.
- * The engine will check this against the current time.
+ * Creates a condition that is ready once the task has existed for the
+ * given delay, counted from task creation. Until then the task is
+ * skipped with retryInMs set to the remaining delay, so the reschedule
+ * lands exactly when the window elapses.
  */
 export function afterDelay(delayMs: number): RunConditionFn {
-  return (_ctx) => {
-    // The engine will handle this by checking scheduledFor
-    // This condition just signals to the engine to use delay scheduling
-    return { ready: true, retryInMs: delayMs };
+  return (ctx) => {
+    const { now, taskCreatedAt } = ctx;
+    if (typeof now !== 'number' || typeof taskCreatedAt !== 'number') {
+      // Evaluated outside the engine (no time context) — don't block.
+      return { ready: true };
+    }
+
+    const readyAt = taskCreatedAt + delayMs;
+    if (now >= readyAt) {
+      return { ready: true };
+    }
+    return {
+      ready: false,
+      reason: `Waiting for delay (${readyAt - now}ms remaining)`,
+      retryInMs: readyAt - now,
+    };
   };
 }
 
