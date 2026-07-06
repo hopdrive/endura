@@ -98,6 +98,11 @@ export class InspectorSession {
     return this.online;
   }
 
+  /** The live client, for the engine manager panel. Null when closed. */
+  getClient(): ParityClient | null {
+    return this.client;
+  }
+
   async open(): Promise<void> {
     if (this.client) return;
     const client = await expoPlatform.createClient(DB_NAME, () => this.online);

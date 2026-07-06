@@ -87,6 +87,11 @@ export class FieldTestSession {
 
   private client: ParityClient | null = null;
   private networkSub: { remove(): void } | null = null;
+  /** What the radio reports. */
+  private radioOnline = true;
+  /** Software override: test offline flows without airplane mode. */
+  private forcedOffline = false;
+  /** Effective connectivity the engine sees (radio AND not forced). */
   private online = true;
   private jobCounter = 0;
 
@@ -96,6 +101,30 @@ export class FieldTestSession {
 
   isOnline(): boolean {
     return this.online;
+  }
+
+  isRadioOnline(): boolean {
+    return this.radioOnline;
+  }
+
+  isForcedOffline(): boolean {
+    return this.forcedOffline;
+  }
+
+  /** The live client, for the engine manager panel. Null when closed. */
+  getClient(): ParityClient | null {
+    return this.client;
+  }
+
+  private applyConnectivity(): void {
+    this.online = this.radioOnline && !this.forcedOffline;
+    this.client?.environment?.setNetworkState?.(this.online);
+  }
+
+  /** Toggle the software offline override (radio state is untouched). */
+  toggleForceOffline(): void {
+    this.forcedOffline = !this.forcedOffline;
+    this.applyConnectivity();
   }
 
   setEndpoint(url: string): void {
@@ -149,21 +178,22 @@ export class FieldTestSession {
     if (this.client) return;
     const client = await expoPlatform.createClient(DB_NAME, () => this.online);
 
-    // Real connectivity, both pull and push.
+    // Real connectivity, both pull and push (composed with the
+    // software force-offline override).
+    this.client = client;
     try {
       const state = await Network.getNetworkStateAsync();
-      this.online = state.isInternetReachable ?? state.isConnected ?? true;
+      this.radioOnline = state.isInternetReachable ?? state.isConnected ?? true;
     } catch {
-      this.online = true;
+      this.radioOnline = true;
     }
-    client.environment?.setNetworkState?.(this.online);
+    this.applyConnectivity();
     this.networkSub = Network.addNetworkStateListener(state => {
-      this.online = state.isInternetReachable ?? state.isConnected ?? false;
-      client.environment?.setNetworkState?.(this.online);
+      this.radioOnline = state.isInternetReachable ?? state.isConnected ?? false;
+      this.applyConnectivity();
     });
 
     for (const workflow of this.buildWorkflows()) client.registerWorkflow(workflow);
-    this.client = client;
     // Production-style loop: the engine ticks itself from here on.
     void client.start({ tickInterval: 1000 }).catch(() => undefined);
   }

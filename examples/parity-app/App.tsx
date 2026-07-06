@@ -29,7 +29,7 @@ import { scenarios } from './src/scenarios';
 import { guides } from './src/content/guides';
 import { LearnScreen } from './src/ui/LearnScreen';
 import { ScenarioCard } from './src/ui/ScenarioCard';
-import { EngineStatusBar, EngineStatus } from './src/ui/EngineStatusBar';
+import { EnginePanel, EngineStatus, ConnectivityControl } from './src/ui/EnginePanel';
 import { Btn, SegmentedTabs, PillState } from './src/ui/primitives';
 import { colors, spacing, type } from './src/ui/theme';
 
@@ -84,16 +84,17 @@ export default function App() {
           }
           return;
         }
-        if (fieldRef.current?.isOpen()) {
-          // The field engine keeps running across tabs — always show it
-          // unless a scenario run is live.
-          const stats = await fieldRef.current.stats();
-          if (!cancelled) setEngineStatus({ source: 'field', label: 'field test', ...stats });
-          return;
-        }
+        // Tab-aware priority: on the Playground tab its engine wins (so
+        // its GO OFFLINE toggle is reflected here); everywhere else the
+        // always-on field engine shows when it exists.
         if (tab === 'playground' && inspectorRef.current?.isOpen()) {
           const stats = await inspectorRef.current.stats();
           if (!cancelled) setEngineStatus({ source: 'playground', label: 'playground', ...stats });
+          return;
+        }
+        if (fieldRef.current?.isOpen()) {
+          const stats = await fieldRef.current.stats();
+          if (!cancelled) setEngineStatus({ source: 'field', label: 'field test', ...stats });
           return;
         }
         if (!cancelled) setEngineStatus(null);
@@ -199,6 +200,36 @@ export default function App() {
 
   const passed = Object.values(runStates).filter(s => s === 'passed').length;
 
+  /** The live engine's client, for the manager panel's deep inspection. */
+  const getPanelClient = useCallback((): ParityClient | null => {
+    if (liveScenario && liveRef.current) return liveRef.current.client;
+    if (tab === 'playground' && inspectorRef.current?.isOpen()) return inspectorRef.current.getClient();
+    if (fieldRef.current?.isOpen()) return fieldRef.current.getClient();
+    return null;
+  }, [liveScenario, tab]);
+
+  /** Connectivity toggle for the panel, per source. */
+  const panelConnectivity: ConnectivityControl | undefined = (() => {
+    if (!engineStatus) return undefined;
+    if (engineStatus.source === 'playground') {
+      const inspector = inspectorRef.current!;
+      return {
+        toggleLabel: engineStatus.online ? 'GO OFFLINE' : 'GO ONLINE',
+        onToggle: () => inspector.setOnline(!inspector.isOnline()),
+        note: 'simulated connectivity — this engine only',
+      };
+    }
+    if (engineStatus.source === 'field') {
+      const field = fieldRef.current!;
+      return {
+        toggleLabel: field.isForcedOffline() ? 'RESUME ONLINE' : 'FORCE OFFLINE',
+        onToggle: () => field.toggleForceOffline(),
+        note: `radio: ${field.isRadioOnline() ? 'online' : 'offline'}${field.isForcedOffline() ? ' · software override: FORCED OFFLINE' : ''} — or use real airplane mode`,
+      };
+    }
+    return undefined; // scenario: the harness scripts connectivity
+  })();
+
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.masthead}>
@@ -281,9 +312,11 @@ export default function App() {
         {tab === 'playground' ? <InspectorPanel session={inspectorRef.current} /> : null}
       </ScrollView>
 
-      <EngineStatusBar
+      <EnginePanel
         status={engineStatus}
-        onPress={() => {
+        getClient={getPanelClient}
+        connectivity={panelConnectivity}
+        onJumpToSource={() => {
           if (engineStatus?.source === 'scenario' && liveScenario) jumpToScenario(liveScenario.id);
           else if (engineStatus?.source === 'field') switchTab('field');
           else if (engineStatus?.source === 'playground') switchTab('playground');
