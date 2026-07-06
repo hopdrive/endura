@@ -189,6 +189,38 @@ export class InspectorSession {
     await this.required().engine.retryFromDeadLetter(deadLetterId);
   }
 
+  /**
+   * Light live-state read for the status bar: counts only, no table
+   * scans — cheap enough to poll.
+   */
+  async stats(): Promise<{
+    online: boolean;
+    runningExecutions: number;
+    pendingTasks: number;
+    activeTasks: number;
+    deadLetters: number;
+    effects: number;
+    lastEvent: string | null;
+  }> {
+    const client = this.required();
+    const [running, pending, active, deadLetters] = await Promise.all([
+      client.storage.getExecutionsByStatus('running'),
+      client.storage.getActivityTasksByStatus('pending'),
+      client.storage.getActivityTasksByStatus('active'),
+      client.storage.getDeadLetters(),
+    ]);
+    const lastLine = client.parityLogs[client.parityLogs.length - 1];
+    return {
+      online: this.online,
+      runningExecutions: running.length,
+      pendingTasks: pending.length,
+      activeTasks: active.length,
+      deadLetters: deadLetters.length,
+      effects: this.server.getEffects().length,
+      lastEvent: lastLine ?? null,
+    };
+  }
+
   async snapshot(): Promise<InspectorSnapshot> {
     const client = this.required();
     const executions = (

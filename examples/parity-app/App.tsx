@@ -15,21 +15,25 @@
  * own database file; reset deletes the file. JSON export via Share.
  */
 
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Pressable, SafeAreaView, ScrollView, Share, StyleSheet, Text, View } from 'react-native';
 import { ScenarioResult } from './src/harness/types';
 import { runScenario, ParityScenario } from './src/harness/runner';
+import { FakeServer } from './src/harness/fakeServer';
 import { expoPlatform, ParityClient } from './src/harness/expoPlatform';
 import { InspectorSession } from './src/harness/inspector';
+import { FieldTestSession } from './src/harness/fieldSession';
 import { InspectorPanel } from './src/InspectorPanel';
+import { FieldTestScreen } from './src/ui/FieldTestScreen';
 import { scenarios } from './src/scenarios';
 import { guides } from './src/content/guides';
 import { LearnScreen } from './src/ui/LearnScreen';
 import { ScenarioCard } from './src/ui/ScenarioCard';
+import { EngineStatusBar, EngineStatus } from './src/ui/EngineStatusBar';
 import { Btn, SegmentedTabs, PillState } from './src/ui/primitives';
 import { colors, spacing, type } from './src/ui/theme';
 
-type MainTab = 'learn' | 'scenarios' | 'playground';
+type MainTab = 'learn' | 'scenarios' | 'field' | 'playground';
 
 export default function App() {
   const [tab, setTab] = useState<MainTab>('learn');
@@ -43,6 +47,68 @@ export default function App() {
 
   const inspectorRef = useRef<InspectorSession | null>(null);
   if (!inspectorRef.current) inspectorRef.current = new InspectorSession();
+  const fieldRef = useRef<FieldTestSession | null>(null);
+  if (!fieldRef.current) fieldRef.current = new FieldTestSession();
+
+  // --- Engine status bar: live handles + a cheap poll -----------------------
+  const liveRef = useRef<{ client: ParityClient; server: FakeServer } | null>(null);
+  const [liveScenario, setLiveScenario] = useState<{ id: string; name: string } | null>(null);
+  const [engineStatus, setEngineStatus] = useState<EngineStatus | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const live = liveRef.current;
+        if (liveScenario && live) {
+          const { client, server } = live;
+          const [running, pending, active, deadLetters] = await Promise.all([
+            client.storage.getExecutionsByStatus('running'),
+            client.storage.getActivityTasksByStatus('pending'),
+            client.storage.getActivityTasksByStatus('active'),
+            client.storage.getDeadLetters(),
+          ]);
+          const lastLine = client.parityLogs[client.parityLogs.length - 1];
+          if (!cancelled) {
+            setEngineStatus({
+              source: 'scenario',
+              label: liveScenario.name,
+              online: server.online,
+              runningExecutions: running.length,
+              pendingTasks: pending.length,
+              activeTasks: active.length,
+              deadLetters: deadLetters.length,
+              effects: server.getEffects().length,
+              lastEvent: lastLine ?? null,
+            });
+          }
+          return;
+        }
+        if (fieldRef.current?.isOpen()) {
+          // The field engine keeps running across tabs — always show it
+          // unless a scenario run is live.
+          const stats = await fieldRef.current.stats();
+          if (!cancelled) setEngineStatus({ source: 'field', label: 'field test', ...stats });
+          return;
+        }
+        if (tab === 'playground' && inspectorRef.current?.isOpen()) {
+          const stats = await inspectorRef.current.stats();
+          if (!cancelled) setEngineStatus({ source: 'playground', label: 'playground', ...stats });
+          return;
+        }
+        if (!cancelled) setEngineStatus(null);
+      } catch {
+        // A client mid-teardown or a closed database is a normal race
+        // for a poller; the next tick will read consistent state.
+      }
+    };
+    void poll();
+    const interval = setInterval(() => void poll(), 700);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [tab, liveScenario]);
 
   /** y-offsets of scenario cards / concept cards inside the scroll content. */
   const offsetsRef = useRef<Record<string, number>>({});
@@ -69,9 +135,16 @@ export default function App() {
     setRunStates(prev => ({ ...prev, [scenario.scenarioId]: 'running' }));
     setExpanded(scenario.scenarioId);
     setLiveLog([]);
-    const result = await runScenario(scenario, expoPlatform, line =>
-      setLiveLog(prev => [...prev.slice(-30), line])
+    setLiveScenario({ id: scenario.scenarioId, name: scenario.name });
+    const result = await runScenario(
+      scenario,
+      expoPlatform,
+      line => setLiveLog(prev => [...prev.slice(-30), line]),
+      live => {
+        liveRef.current = live;
+      }
     );
+    setLiveScenario(null);
     setResults(prev => ({ ...prev, [scenario.scenarioId]: result }));
     setRunStates(prev => ({ ...prev, [scenario.scenarioId]: result.status }));
   }, []);
@@ -146,7 +219,8 @@ export default function App() {
         <SegmentedTabs<MainTab>
           tabs={[
             { key: 'learn', label: 'Learn' },
-            { key: 'scenarios', label: 'Scenarios' },
+            { key: 'scenarios', label: 'Lab' },
+            { key: 'field', label: 'Field Test' },
             { key: 'playground', label: 'Playground' },
           ]}
           active={tab}
@@ -168,8 +242,10 @@ export default function App() {
             </View>
             {runAllProgress ? <Text style={styles.progress}>{runAllProgress}</Text> : null}
             <Text style={[type.body, styles.lede]}>
-              Each card is one way durable queues break in production — and the proof Endura doesn’t. Tap a
-              card for the story, the live result, and the code you’d write.
+              This is the lab: each card is one way durable queues break in production, reproduced as a
+              deterministic, automated simulation — crashes, connectivity, and the server are all scripted so
+              every claim is repeatable. Tap a card for the story, the live result, and the code you’d write.
+              For the un-simulated version on real hardware, open FIELD TEST.
             </Text>
             {scenarios.map(scenario => (
               <View
@@ -200,8 +276,19 @@ export default function App() {
           </View>
         ) : null}
 
+        {tab === 'field' ? <FieldTestScreen session={fieldRef.current} /> : null}
+
         {tab === 'playground' ? <InspectorPanel session={inspectorRef.current} /> : null}
       </ScrollView>
+
+      <EngineStatusBar
+        status={engineStatus}
+        onPress={() => {
+          if (engineStatus?.source === 'scenario' && liveScenario) jumpToScenario(liveScenario.id);
+          else if (engineStatus?.source === 'field') switchTab('field');
+          else if (engineStatus?.source === 'playground') switchTab('playground');
+        }}
+      />
     </SafeAreaView>
   );
 }

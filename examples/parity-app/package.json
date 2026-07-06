@@ -6,6 +6,7 @@
     "endura": "file:../../endura-0.1.0.tgz",
     "expo": "~54.0.35",
     "expo-crypto": "~15.0.9",
+    "expo-network": "~8.0.8",
     "expo-sqlite": "~16.0.10",
     "expo-status-bar": "~3.0.9",
     "react": "19.1.0",

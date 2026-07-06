@@ -11,16 +11,30 @@ that break hand-rolled queues.
   concept glossary (workflows, ticks, runWhen holds, leases, uniqueKey, DLQ,
   priorities, upgrade skew…). Every concept shows the minimal code and links to
   the scenario where you can watch it happen.
-- **Scenarios** — the 15 Phase-4 parity scenarios as teaching cards. Each card
+- **Lab (Scenarios)** — the 15 Phase-4 parity scenarios as teaching cards,
+  deliberately SIMULATED so they are deterministic and automatable. Each card
   leads with the skeptic's question it answers ("What happens to a six-stage
   photo upload when the app is killed at stage three?"), narrates the engine
   live while it runs, then shows steps, assertions, the business-effect ledger
   (the anti-duplicate proof), and a CODE view with the sample code + file
   structure you would use in a real app.
-- **Playground** — a live engine over its own database, driven by hand: start
-  jobs, tick, toggle connectivity, restart, background-wake a second engine,
-  inject failures (transient / refusal / hung / slow / late), and rescue dead
+- **Field Test** — the UN-simulated counterpart, built for a physical phone:
+  a production-style engine (real tick loop) over a database that is never
+  reset between launches, real connectivity from the radio (expo-network),
+  and real HTTP deliveries to the real internet (httpbin.org by default, or
+  paste a webhook.site URL and watch jobs land on your laptop). Guided
+  missions: baseline delivery → airplane-mode hold & priority flush →
+  backgrounding → force quit & relaunch → real server 500s driving real
+  retries into the DLQ and back out via force retry.
+- **Playground** — a live simulated engine driven by hand: start jobs, tick,
+  toggle connectivity, restart, background-wake a second engine, inject
+  failures (transient / refusal / hung / slow / late), and rescue dead
   letters — with viewers over every table the engine persists.
+
+A fixed-geometry **engine instrument panel** is pinned to the bottom of every
+tab: which engine is live, real online/offline state, four KPI counters
+(queued / running / dead-lettered / delivered), and a ticker narrating the
+engine's last action.
 
 ## Running it
 

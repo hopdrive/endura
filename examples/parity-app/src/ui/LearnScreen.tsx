@@ -65,10 +65,10 @@ export function LearnScreen({
 
       <Card>
         <Overline>How to use this app</Overline>
-        <Step n="1" text="Read a scenario card's question — each one is a way durable queues break in production." />
-        <Step n="2" text="Tap RUN and watch the live feed: ticks, holds, retries, restarts, effects landing." />
-        <Step n="3" text="Open the CODE view to see exactly what you would write to get that behavior — usually a few lines." />
-        <Step n="4" text="Use the Playground to drive an engine by hand: inject failures, toggle connectivity, force retries." />
+        <Step n="1" text="LAB: read a scenario card's question — each one is a way durable queues break in production. Tap RUN and watch the automated, deterministic proof." />
+        <Step n="2" text="Open a card's CODE view to see exactly what you would write to get that behavior — usually a few lines." />
+        <Step n="3" text="PLAYGROUND: drive a simulated engine by hand — inject failures, toggle connectivity, force retries." />
+        <Step n="4" text="FIELD TEST (on a real phone): nothing simulated. Add jobs, flip airplane mode, background it, force-quit it — then watch real deliveries flow to the real internet, in order, when you come back." />
       </Card>
 
       <Overline>Concepts — tap to expand</Overline>

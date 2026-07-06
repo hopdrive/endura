@@ -110,7 +110,13 @@ class Controller implements ScenarioController {
 export async function runScenario<TClient extends HarnessClient>(
   scenario: ParityScenario<TClient>,
   platform: HarnessPlatform<TClient>,
-  onLog?: (line: string) => void
+  onLog?: (line: string) => void,
+  /**
+   * Live-state hook for status UIs: fires with the current client +
+   * fake server whenever they (re)materialize — at start and after
+   * every simulated restart — and with null once the run tears down.
+   */
+  onLive?: (live: { client: TClient; server: FakeServer } | null) => void
 ): Promise<ScenarioResult> {
   const controller = new Controller(platform.now);
   const originalLog = controller.log.bind(controller);
@@ -129,6 +135,7 @@ export async function runScenario<TClient extends HarnessClient>(
 
   let client = await platform.createClient(dbName, () => connectivity.online);
   client.environment?.setNetworkState?.(connectivity.online);
+  onLive?.({ client, server });
   let foregroundLoop: Promise<void> | null = null;
 
   const startForeground = () => {
@@ -158,6 +165,7 @@ export async function runScenario<TClient extends HarnessClient>(
       await client.close();
       client = await platform.createClient(dbName, () => connectivity.online);
       client.environment?.setNetworkState?.(connectivity.online);
+      onLive?.({ client, server });
       scenario.register(client, ctx);
       startForeground();
     },
@@ -211,6 +219,7 @@ export async function runScenario<TClient extends HarnessClient>(
   } catch (err) {
     controller.log(`teardown failed: ${String(err)}`);
   }
+  onLive?.(null);
   void foregroundLoop;
 
   return {
