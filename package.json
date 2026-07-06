@@ -71,13 +71,13 @@
   "devDependencies": {
     "@testing-library/dom": "^9.3.4",
     "@testing-library/react": "^14.3.1",
-    "@types/better-sqlite3": "^7.6.8",
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^20.11.0",
     "@types/react": "^18.2.0",
     "@typescript-eslint/eslint-plugin": "^8.51.0",
     "@typescript-eslint/parser": "^8.51.0",
     "@vitest/coverage-v8": "^4.0.16",
-    "better-sqlite3": "^9.4.0",
+    "better-sqlite3": "^12.11.1",
     "eslint": "^9.39.2",
     "husky": "^9.1.7",
     "jsdom": "^27.4.0",
@@ -87,9 +87,9 @@
     "vitest": "^4.0.16"
   },
   "peerDependencies": {
+    "expo-crypto": ">=12.0.0",
     "expo-sqlite": ">=13.0.0",
-    "react": ">=18.0.0",
-    "expo-crypto": ">=12.0.0"
+    "react": ">=18.0.0"
   },
   "peerDependenciesMeta": {
     "expo-sqlite": {
