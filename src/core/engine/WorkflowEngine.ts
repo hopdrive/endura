@@ -26,6 +26,7 @@ import {
   ActivityTimeoutError,
   RunConditionFn,
   isNonRetryableError,
+  TaskErrorHistoryEntry,
 } from '../types';
 import { generateId, mergeState, calculateBackoffDelay, silentLogger, createAbortController } from '../utils';
 import { conditions } from '../conditions';
@@ -47,6 +48,17 @@ const HELD_TASK_RECHECK_DELAY = 60000;
 // Recheck cadence for tasks skipped by runWhen when the condition gives
 // no retryInMs hint.
 const DEFAULT_SKIP_RESCHEDULE_DELAY = 30000;
+// Bound on per-task error history — oldest entries drop first. Keeps
+// long-retrying offline tasks from growing their row on every attempt.
+const MAX_ERROR_HISTORY = 20;
+
+/** Append to a task's bounded error history (newest last). */
+function appendErrorHistory(
+  history: TaskErrorHistoryEntry[] | undefined,
+  entry: TaskErrorHistoryEntry
+): TaskErrorHistoryEntry[] {
+  return [...(history ?? []), entry].slice(-MAX_ERROR_HISTORY);
+}
 
 /**
  * The WorkflowEngine orchestrates workflow execution.
@@ -1010,6 +1022,11 @@ export class WorkflowEngine {
     // Only real failures count toward exhaustion — attempts is the claim
     // count and includes claims lost to crashes.
     const failures = (task.failures ?? 0) + 1;
+    const errorHistory = appendErrorHistory(task.errorHistory, {
+      at: now,
+      kind: 'failure',
+      message: error.message,
+    });
 
     if (failures < task.maxAttempts && !isNonRetryableError(error)) {
       // Schedule retry with backoff
@@ -1029,6 +1046,7 @@ export class WorkflowEngine {
         lastAttemptAt: now,
         error: error.message,
         errorStack: error.stack,
+        errorHistory,
         ownerId: undefined,
         leaseExpiresAt: undefined,
       };
@@ -1042,7 +1060,7 @@ export class WorkflowEngine {
       });
     } else {
       // Permanent failure
-      await this.handleTaskPermanentFailure({ ...task, failures }, error);
+      await this.handleTaskPermanentFailure({ ...task, failures, errorHistory }, error);
     }
   }
 
@@ -1245,6 +1263,7 @@ export class WorkflowEngine {
       status: 'pending',
       scheduledFor: now + delay,
       lastAttemptAt: now,
+      errorHistory: appendErrorHistory(task.errorHistory, { at: now, kind: 'skip', message: reason }),
       ownerId: undefined,
       leaseExpiresAt: undefined,
     };

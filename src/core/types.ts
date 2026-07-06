@@ -63,6 +63,17 @@ export interface WorkflowExecution {
 // ============================================================================
 
 /**
+ * One recorded failure or skip in a task's history.
+ */
+export interface TaskErrorHistoryEntry {
+  /** When it happened (engine Clock, unix ms) */
+  at: number;
+  /** failure = exception/timeout; skip = runWhen condition not ready */
+  kind: 'failure' | 'skip';
+  message: string;
+}
+
+/**
  * An ActivityTask is a persisted record representing a scheduled activity execution.
  * Users don't interact with these directly - they're internal to the engine.
  */
@@ -112,6 +123,12 @@ export interface ActivityTask {
   error?: string;
   /** Last error stack trace */
   errorStack?: string;
+  /**
+   * Bounded log of failures and skips across attempts (newest last).
+   * The single error field above only ever holds the LAST error; this
+   * preserves the full picture for failure reporting and jobs UIs.
+   */
+  errorHistory?: TaskErrorHistoryEntry[];
 }
 
 // ============================================================================

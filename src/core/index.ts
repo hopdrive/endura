@@ -12,6 +12,7 @@ export {
   // Data models
   WorkflowExecution,
   ActivityTask,
+  TaskErrorHistoryEntry,
   DeadLetterRecord,
 
   // Activity types

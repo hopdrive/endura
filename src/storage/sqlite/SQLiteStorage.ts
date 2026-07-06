@@ -11,6 +11,7 @@ import {
   ActivityTask,
   ActivityTaskStatus,
   DeadLetterRecord,
+  TaskErrorHistoryEntry,
 } from '../../core/types';
 import { SQLiteDriver, SQLiteRow } from './internal/SQLiteDriver';
 import { getSchemaStatements, MIGRATIONS, SCHEMA_VERSION } from './internal/schema';
@@ -185,9 +186,20 @@ export class SQLiteStorage implements Storage {
       completedAt: row['completed_at'] != null ? Number(row['completed_at']) : undefined,
       error: row['error'] != null ? String(row['error'] as string) : undefined,
       errorStack: row['error_stack'] != null ? String(row['error_stack'] as string) : undefined,
+      errorHistory: this.parseErrorHistory(row['error_history']),
       ownerId: row['owner_id'] != null ? String(row['owner_id'] as string) : undefined,
       leaseExpiresAt: row['lease_expires_at'] != null ? Number(row['lease_expires_at']) : undefined,
     };
+  }
+
+  private parseErrorHistory(raw: unknown): TaskErrorHistoryEntry[] | undefined {
+    if (raw == null) return undefined;
+    try {
+      const parsed = JSON.parse(raw as string) as unknown;
+      return Array.isArray(parsed) ? (parsed as TaskErrorHistoryEntry[]) : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   private rowToDeadLetter(row: SQLiteRow): DeadLetterRecord {
@@ -343,8 +355,8 @@ export class SQLiteStorage implements Storage {
       `INSERT OR REPLACE INTO activity_tasks (
         task_id, run_id, activity_name, status, priority, attempts, failures, max_attempts, timeout,
         input, result, created_at, scheduled_for, started_at, last_attempt_at, completed_at, error, error_stack,
-        owner_id, lease_expires_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        error_history, owner_id, lease_expires_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         task.taskId,
         task.runId,
@@ -364,6 +376,7 @@ export class SQLiteStorage implements Storage {
         task.completedAt ?? null,
         task.error ?? null,
         task.errorStack ?? null,
+        task.errorHistory ? JSON.stringify(task.errorHistory) : null,
         task.ownerId ?? null,
         task.leaseExpiresAt ?? null,
       ]

@@ -272,6 +272,32 @@ describe('schema migrations (C8)', () => {
     await storage.close();
   });
 
+  it('migrates activity_tasks to carry error history (v5)', async () => {
+    const driver = await createPopulatedV1Db();
+    const storage = new SQLiteStorage(driver);
+    await storage.initialize();
+
+    // Legacy rows have no history.
+    const legacy = await storage.getActivityTask('task-1');
+    expect(legacy?.errorHistory).toBeUndefined();
+
+    // New writes round-trip the history.
+    await storage.saveActivityTask({
+      ...legacy!,
+      errorHistory: [
+        { at: 1500, kind: 'failure', message: 'boom' },
+        { at: 1600, kind: 'skip', message: 'offline' },
+      ],
+    });
+    const saved = await storage.getActivityTask('task-1');
+    expect(saved?.errorHistory).toEqual([
+      { at: 1500, kind: 'failure', message: 'boom' },
+      { at: 1600, kind: 'skip', message: 'offline' },
+    ]);
+
+    await storage.close();
+  });
+
   it('refuses to open a database from a newer package version', async () => {
     const driver = await createPopulatedV1Db();
     await driver.execute(`PRAGMA user_version = ${SCHEMA_VERSION + 1}`);
