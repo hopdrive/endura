@@ -4,6 +4,12 @@
  * These hooks provide reactive access to workflow state for building UIs.
  * They work with any storage adapter.
  *
+ * Reactivity: hooks subscribe to storage change events (Storage.subscribe)
+ * and refresh only when a relevant record changes, coalescing bursts.
+ * Interval polling is used ONLY as a fallback when the storage adapter
+ * doesn't implement subscribe — the `refreshInterval` parameters control
+ * that fallback cadence and are otherwise unused.
+ *
  * @example
  * ```tsx
  * import { useExecution, useDeadLetters } from 'endura/react';
@@ -29,49 +35,96 @@ import {
   WorkflowExecutionStatus,
   DeadLetterRecord,
   Storage,
+  StorageChange,
   Workflow,
   StartWorkflowOptions,
 } from '../core/types';
 import { WorkflowEngine } from '../core/engine';
+
+// Trailing debounce for change bursts: one engine advance emits several
+// storage events back-to-back; a single refresh shortly after the last
+// write is imperceptible in the UI and much cheaper.
+const COALESCE_MS = 50;
+
+/**
+ * Shared wiring: refresh once on mount, then on relevant storage
+ * changes (coalesced). Falls back to interval polling only when the
+ * storage has no subscribe capability.
+ */
+function useStorageDrivenRefresh(
+  subscribe: ((callback: (change: StorageChange) => void) => (() => void) | undefined) | undefined,
+  refresh: () => Promise<void>,
+  isRelevant: (change: StorageChange) => boolean,
+  fallbackIntervalMs: number,
+  deps: readonly unknown[]
+): void {
+  useEffect(() => {
+    let disposed = false;
+    let coalesceTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const safeRefresh = () => {
+      if (!disposed) void refresh();
+    };
+
+    safeRefresh();
+
+    const scheduleRefresh = () => {
+      if (coalesceTimer !== null) return;
+      coalesceTimer = setTimeout(() => {
+        coalesceTimer = null;
+        safeRefresh();
+      }, COALESCE_MS);
+    };
+
+    const unsubscribe = subscribe?.(change => {
+      if (isRelevant(change)) scheduleRefresh();
+    });
+
+    let pollInterval: ReturnType<typeof setInterval> | null = null;
+    if (!unsubscribe) {
+      pollInterval = setInterval(safeRefresh, fallbackIntervalMs);
+    }
+
+    return () => {
+      disposed = true;
+      if (coalesceTimer !== null) clearTimeout(coalesceTimer);
+      if (unsubscribe) unsubscribe();
+      if (pollInterval !== null) clearInterval(pollInterval);
+    };
+  }, deps);
+}
 
 /**
  * Hook to subscribe to a workflow execution.
  *
  * @param engine - The workflow engine
  * @param runId - The execution run ID
+ * @param refreshInterval - Fallback polling cadence in ms, used only when the storage lacks subscribe (default: 1000)
  * @returns The execution or null if not found/loading
  */
 export function useExecution(
   engine: WorkflowEngine,
-  runId: string | null | undefined
+  runId: string | null | undefined,
+  refreshInterval: number = 1000
 ): WorkflowExecution | null {
   const [execution, setExecution] = useState<WorkflowExecution | null>(null);
 
   useEffect(() => {
-    if (!runId) {
-      setExecution(null);
-      return;
-    }
+    if (!runId) setExecution(null);
+  }, [runId]);
 
-    // Initial fetch
-    void engine.getExecution(runId).then(setExecution);
-
-    // Subscribe to changes
-    // Note: This uses polling since the engine doesn't have built-in subscriptions
-    // In a production app, you might want to add subscription support to the engine
-    const interval = setInterval(async () => {
-      const updated = await engine.getExecution(runId);
-      setExecution(prev => {
-        // Only update if changed
-        if (JSON.stringify(prev) !== JSON.stringify(updated)) {
-          return updated;
-        }
-        return prev;
-      });
-    }, 500);
-
-    return () => clearInterval(interval);
-  }, [engine, runId]);
+  useStorageDrivenRefresh(
+    // With no runId there is nothing to watch: a dummy subscription
+    // keeps the fallback poller off.
+    runId ? callback => engine.subscribeToChanges(callback) : () => () => {},
+    async () => {
+      if (!runId) return;
+      setExecution(await engine.getExecution(runId));
+    },
+    change => change.type === 'execution' && change.id === runId,
+    refreshInterval,
+    [engine, runId, refreshInterval]
+  );
 
   return execution;
 }
@@ -81,7 +134,7 @@ export function useExecution(
  *
  * @param engine - The workflow engine
  * @param status - The status to filter by
- * @param refreshInterval - How often to refresh in ms (default: 1000)
+ * @param refreshInterval - Fallback polling cadence in ms, used only when the storage lacks subscribe (default: 1000)
  * @returns Array of executions with the given status
  */
 export function useExecutionsByStatus(
@@ -91,19 +144,15 @@ export function useExecutionsByStatus(
 ): WorkflowExecution[] {
   const [executions, setExecutions] = useState<WorkflowExecution[]>([]);
 
-  useEffect(() => {
-    const refresh = async () => {
-      const result = await engine.getExecutionsByStatus(status);
-      setExecutions(result);
-    };
-
-    void refresh();
-    const interval = setInterval(() => {
-      void refresh();
-    }, refreshInterval);
-
-    return () => clearInterval(interval);
-  }, [engine, status, refreshInterval]);
+  useStorageDrivenRefresh(
+    callback => engine.subscribeToChanges(callback),
+    async () => {
+      setExecutions(await engine.getExecutionsByStatus(status));
+    },
+    change => change.type === 'execution',
+    refreshInterval,
+    [engine, status, refreshInterval]
+  );
 
   return executions;
 }
@@ -113,7 +162,7 @@ export function useExecutionsByStatus(
  *
  * @param engine - The workflow engine
  * @param unacknowledgedOnly - Only return unacknowledged dead letters
- * @param refreshInterval - How often to refresh in ms (default: 5000)
+ * @param refreshInterval - Fallback polling cadence in ms, used only when the storage lacks subscribe (default: 5000)
  * @returns Array of dead letter records
  */
 export function useDeadLetters(
@@ -123,21 +172,17 @@ export function useDeadLetters(
 ): DeadLetterRecord[] {
   const [deadLetters, setDeadLetters] = useState<DeadLetterRecord[]>([]);
 
-  useEffect(() => {
-    const refresh = async () => {
-      const result = unacknowledgedOnly
-        ? await engine.getUnacknowledgedDeadLetters()
-        : await engine.getDeadLetters();
-      setDeadLetters(result);
-    };
-
-    void refresh();
-    const interval = setInterval(() => {
-      void refresh();
-    }, refreshInterval);
-
-    return () => clearInterval(interval);
-  }, [engine, unacknowledgedOnly, refreshInterval]);
+  useStorageDrivenRefresh(
+    callback => engine.subscribeToChanges(callback),
+    async () => {
+      setDeadLetters(
+        unacknowledgedOnly ? await engine.getUnacknowledgedDeadLetters() : await engine.getDeadLetters()
+      );
+    },
+    change => change.type === 'deadletter',
+    refreshInterval,
+    [engine, unacknowledgedOnly, refreshInterval]
+  );
 
   return deadLetters;
 }
@@ -146,28 +191,22 @@ export function useDeadLetters(
  * Hook to track pending activity count.
  *
  * @param storage - The storage adapter
- * @param refreshInterval - How often to refresh in ms (default: 1000)
+ * @param refreshInterval - Fallback polling cadence in ms, used only when the storage lacks subscribe (default: 1000)
  * @returns Number of pending activities
  */
-export function usePendingActivityCount(
-  storage: Storage,
-  refreshInterval: number = 1000
-): number {
+export function usePendingActivityCount(storage: Storage, refreshInterval: number = 1000): number {
   const [count, setCount] = useState(0);
 
-  useEffect(() => {
-    const refresh = async () => {
+  useStorageDrivenRefresh(
+    callback => storage.subscribe?.(callback),
+    async () => {
       const tasks = await storage.getActivityTasksByStatus('pending');
       setCount(tasks.length);
-    };
-
-    void refresh();
-    const interval = setInterval(() => {
-      void refresh();
-    }, refreshInterval);
-
-    return () => clearInterval(interval);
-  }, [storage, refreshInterval]);
+    },
+    change => change.type === 'task',
+    refreshInterval,
+    [storage, refreshInterval]
+  );
 
   return count;
 }
@@ -187,13 +226,10 @@ export interface ExecutionStats {
  * Hook to get aggregate execution statistics.
  *
  * @param engine - The workflow engine
- * @param refreshInterval - How often to refresh in ms (default: 2000)
+ * @param refreshInterval - Fallback polling cadence in ms, used only when the storage lacks subscribe (default: 2000)
  * @returns Execution statistics
  */
-export function useExecutionStats(
-  engine: WorkflowEngine,
-  refreshInterval: number = 2000
-): ExecutionStats {
+export function useExecutionStats(engine: WorkflowEngine, refreshInterval: number = 2000): ExecutionStats {
   const [stats, setStats] = useState<ExecutionStats>({
     running: 0,
     completed: 0,
@@ -202,8 +238,9 @@ export function useExecutionStats(
     total: 0,
   });
 
-  useEffect(() => {
-    const refresh = async () => {
+  useStorageDrivenRefresh(
+    callback => engine.subscribeToChanges(callback),
+    async () => {
       const [running, completed, failed, cancelled] = await Promise.all([
         engine.getExecutionsByStatus('running'),
         engine.getExecutionsByStatus('completed'),
@@ -218,15 +255,11 @@ export function useExecutionStats(
         cancelled: cancelled.length,
         total: running.length + completed.length + failed.length + cancelled.length,
       });
-    };
-
-    void refresh();
-    const interval = setInterval(() => {
-      void refresh();
-    }, refreshInterval);
-
-    return () => clearInterval(interval);
-  }, [engine, refreshInterval]);
+    },
+    change => change.type === 'execution',
+    refreshInterval,
+    [engine, refreshInterval]
+  );
 
   return stats;
 }

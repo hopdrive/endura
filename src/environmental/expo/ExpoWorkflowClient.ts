@@ -235,4 +235,8 @@ export class ExpoWorkflowClient {
   get purgeDeadLetters() {
     return this.engine.purgeDeadLetters.bind(this.engine);
   }
+
+  get subscribeToChanges() {
+    return this.engine.subscribeToChanges.bind(this.engine);
+  }
 }

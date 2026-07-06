@@ -4,6 +4,7 @@
 
 import {
   Storage,
+  StorageChange,
   Clock,
   Scheduler,
   Environment,
@@ -432,6 +433,16 @@ export class WorkflowEngine {
    */
   async getExecution(runId: string): Promise<WorkflowExecution | null> {
     return this.storage.getExecution(runId);
+  }
+
+  /**
+   * Subscribe to storage change events (executions, tasks, dead
+   * letters). Returns the unsubscribe function, or undefined when the
+   * storage adapter doesn't support subscriptions — callers should fall
+   * back to polling in that case.
+   */
+  subscribeToChanges(callback: (change: StorageChange) => void): (() => void) | undefined {
+    return this.storage.subscribe?.(callback);
   }
 
   /**
