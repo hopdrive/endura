@@ -12,9 +12,10 @@
  * crash/restart point is deterministic.
  */
 
-import { defineActivity, defineWorkflow, Workflow, WorkflowExecution } from 'endura';
+import { defineActivity, defineWorkflow, Workflow } from 'endura';
 import { ParityScenario, ParityContext } from '../harness/runner';
 import { ParityClient } from '../harness/expoPlatform';
+import { tickUntil, execOf } from './util';
 
 /** Per-run mutable state; reset at the top of run(), survives restarts. */
 const state = {
@@ -25,27 +26,6 @@ const state = {
 
 function bump(stage: string): void {
   state.stageRuns[stage] = (state.stageRuns[stage] ?? 0) + 1;
-}
-
-async function tickUntil(
-  ctx: ParityContext<ParityClient>,
-  what: string,
-  condition: () => Promise<boolean>,
-  timeoutMs = 30000
-): Promise<void> {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    await ctx.client.tick();
-    if (await condition()) return;
-    await ctx.sleep(100);
-  }
-  throw new Error(`timed out ticking until ${what}`);
-}
-
-async function execOf(ctx: ParityContext<ParityClient>, runId: string): Promise<WorkflowExecution> {
-  const execution = await ctx.client.getExecution(runId);
-  if (!execution) throw new Error(`execution ${runId} missing`);
-  return execution;
 }
 
 function buildWorkflow(ctx: ParityContext<ParityClient>): Workflow {
