@@ -8,7 +8,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
-import { DEFAULT_ENDPOINT, FieldTestSession, FieldView } from '../harness/fieldSession';
+import { DEFAULT_ENDPOINT, FieldJobRow, FieldTestSession, FieldView } from '../harness/fieldSession';
 import { Btn, Card, Overline } from './primitives';
 import { colors, mono, radius, spacing, type } from './theme';
 
@@ -125,9 +125,10 @@ export function FieldTestScreen({ session }: { session: FieldTestSession }) {
       <Card>
         <Overline>Delivery endpoint</Overline>
         <Text style={type.body}>
-          Default is httpbin.org (echoes and returns 200). For the full effect, open{' '}
+          Default is postman-echo.com (fast, reliable echo that returns 200). For the full effect, open{' '}
           <Text style={styles.em}>webhook.site</Text> on a laptop, copy your unique URL, paste it here — and
-          watch every job physically arrive on another screen.
+          watch every job physically arrive on another screen. (Flaky jobs always target httpbin's
+          coin-flip endpoint — unreliability is their job.)
         </Text>
         <View style={styles.endpointRow}>
           <TextInput
@@ -168,52 +169,60 @@ export function FieldTestScreen({ session }: { session: FieldTestSession }) {
       </Card>
 
       <Card>
-        <Overline>Queue ({view?.queue.length ?? 0})</Overline>
+        <Overline>
+          Jobs ({view?.jobs.length ?? 0}) — {view?.liveCount ?? 0} live · {view?.deliveredTotal ?? 0} delivered ·{' '}
+          {view?.deadTotal ?? 0} dead
+        </Overline>
         <Text style={[type.caption, styles.caption]}>
-          Pending + active tasks, straight from SQLite. Offline, attempts stay frozen — that is the hold.
+          Every job the engine knows about, straight from SQLite: its phase, attempt count, next retry, and
+          the exact error behind the last failed attempt. Live work sorts to the top by priority.
         </Text>
-        {view && view.queue.length === 0 ? <Text style={styles.line}>empty — everything delivered</Text> : null}
-        {view?.queue.map(row => (
-          <Text key={row.taskId} style={styles.line}>
-            {row.status === 'active' ? '▶' : '·'} p{String(row.priority).padEnd(3)}{row.jobId}  attempts={row.attempts}
-            {row.status === 'pending' && row.scheduledFor ? `  due ${dueIn(row.scheduledFor)}` : ''}
-          </Text>
-        ))}
-      </Card>
-
-      <Card>
-        <Overline>Delivered ({view?.deliveredTotal ?? 0} total)</Overline>
-        <Text style={[type.caption, styles.caption]}>
-          Each line was a real HTTP round-trip. Order here is delivery order — check it against priority after
-          a flush.
-        </Text>
-        {view?.delivered.map(delivery => (
-          <Text key={delivery.jobId + String(delivery.deliveredAt)} style={styles.line}>
-            ✓ {delivery.jobId}  {delivery.httpStatus}
-            {delivery.attempts > 1 ? `  (took ${delivery.attempts} attempts)` : ''}  {timeOf(delivery.deliveredAt)}
-          </Text>
-        ))}
-      </Card>
-
-      <Card>
-        <Overline>Dead letters ({view?.deadLetters.length ?? 0})</Overline>
-        <Text style={[type.caption, styles.caption]}>
-          Work that exhausted all 8 attempts. Parked with full context, waiting for a human — never deleted,
-          never auto-fired.
-        </Text>
-        {view?.deadLetters.map(deadLetter => (
-          <View key={deadLetter.id} style={styles.dlqRow}>
-            <Text style={[styles.line, styles.dlqText]}>
-              {deadLetter.activityName}: {deadLetter.error}
-            </Text>
-            <Pressable
-              testID={`field-retry-${deadLetter.id}`}
-              style={styles.retryButton}
-              onPress={act(() => session.retryDeadLetter(deadLetter.id))}
-            >
-              <Text style={styles.retryText}>RETRY</Text>
-            </Pressable>
+        {view && view.jobs.length === 0 ? <Text style={styles.line}>no jobs yet — add some above</Text> : null}
+        {view?.jobs.map(job => (
+          <View key={job.jobId} style={styles.jobRow}>
+            <View style={styles.jobMain}>
+              <Text style={styles.line} numberOfLines={1}>
+                <Text style={{ color: PHASE_COLOR[job.phase] }}>{PHASE_GLYPH[job.phase]}</Text> {job.jobId}{' '}
+                <Text style={{ color: colors.textMuted }}>p{job.priority}</Text>
+              </Text>
+              <Text style={[styles.jobDetail, { color: PHASE_COLOR[job.phase] }]} numberOfLines={1}>
+                {phaseLine(job)}
+              </Text>
+              {job.lastError && job.phase !== 'delivered' ? (
+                <Text
+                  style={[
+                    styles.jobError,
+                    { color: job.lastError.kind === 'skip' ? colors.textMuted : colors.errorBright },
+                  ]}
+                  numberOfLines={2}
+                >
+                  last attempt {timeOf(job.lastError.at)} — {job.lastError.message}
+                </Text>
+              ) : null}
+            </View>
+            {job.deadLetterId ? (
+              <Pressable
+                testID={`field-retry-${job.deadLetterId}`}
+                style={styles.retryButton}
+                onPress={act(() => session.retryDeadLetter(job.deadLetterId!))}
+              >
+                <Text style={styles.retryText}>RETRY</Text>
+              </Pressable>
+            ) : null}
           </View>
+        ))}
+      </Card>
+
+      <Card>
+        <Overline>Engine log — the library, narrating itself</Overline>
+        <Text style={[type.caption, styles.caption]}>
+          The engine's own logger: scheduling, claims, holds, retries, discards. Everything above is derived
+          from state; this is the play-by-play.
+        </Text>
+        {view?.logs.map((line, i) => (
+          <Text key={i} style={styles.logLine} numberOfLines={2}>
+            {line}
+          </Text>
         ))}
       </Card>
 
@@ -228,6 +237,41 @@ export function FieldTestScreen({ session }: { session: FieldTestSession }) {
       </Card>
     </View>
   );
+}
+
+const PHASE_GLYPH: Record<FieldJobRow['phase'], string> = {
+  waiting: '·',
+  held: '‖',
+  backoff: '↻',
+  active: '▶',
+  delivered: '✓',
+  dead: '✗',
+};
+
+const PHASE_COLOR: Record<FieldJobRow['phase'], string> = {
+  waiting: colors.textSecondary,
+  held: colors.warning,
+  backoff: colors.info,
+  active: colors.info,
+  delivered: colors.successBright,
+  dead: colors.errorBright,
+};
+
+function phaseLine(job: FieldJobRow): string {
+  switch (job.phase) {
+    case 'waiting':
+      return `waiting — attempt ${job.attempts}/${job.maxAttempts}${job.nextAttemptAt ? `, due ${dueIn(job.nextAttemptAt)}` : ''}`;
+    case 'held':
+      return `held (offline) — attempts frozen at ${job.attempts}/${job.maxAttempts}, recheck ${job.nextAttemptAt ? dueIn(job.nextAttemptAt) : 'soon'}`;
+    case 'backoff':
+      return `retry backoff — attempt ${job.attempts}/${job.maxAttempts} failed, next ${job.nextAttemptAt ? dueIn(job.nextAttemptAt) : 'soon'}`;
+    case 'active':
+      return `in flight — attempt ${job.attempts + 1}/${job.maxAttempts}`;
+    case 'delivered':
+      return `delivered ${job.httpStatus ?? ''} at ${job.deliveredAt ? timeOf(job.deliveredAt) : '?'}${job.attempts > 1 ? ` (took ${job.attempts} attempts)` : ''}`;
+    case 'dead':
+      return `dead after ${job.attempts}/${job.maxAttempts} attempts — waiting for force retry`;
+  }
 }
 
 function dueIn(scheduledFor: number): string {
@@ -257,10 +301,19 @@ const styles = StyleSheet.create({
     fontSize: 12,
   },
   buttonRow: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.xs, marginTop: spacing.sm },
-  line: { color: colors.textPrimary, fontFamily: mono, fontSize: 11, marginVertical: 1 },
+  line: { color: colors.textPrimary, fontFamily: mono, fontSize: 12, marginVertical: 1 },
   error: { color: colors.errorBright, fontFamily: mono, fontSize: 11, marginTop: spacing.xs },
-  dlqRow: { flexDirection: 'row', alignItems: 'center', marginVertical: 2 },
-  dlqText: { flex: 1 },
+  jobRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: spacing.xs,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.hairline,
+  },
+  jobMain: { flex: 1 },
+  jobDetail: { fontFamily: mono, fontSize: 11, marginTop: 1 },
+  jobError: { fontFamily: mono, fontSize: 10, marginTop: 2 },
+  logLine: { color: colors.textMuted, fontFamily: mono, fontSize: 10, marginVertical: 1 },
   retryButton: {
     backgroundColor: colors.primaryAccent,
     minHeight: 44,

@@ -31,7 +31,10 @@ import {
 import { expoPlatform, ParityClient } from './expoPlatform';
 
 const DB_NAME = 'parity-field-test.db';
-export const DEFAULT_ENDPOINT = 'https://httpbin.org/post';
+const MAX_ATTEMPTS = 8;
+// postman-echo answers fast and consistently; httpbin.org hangs or
+// 503s often enough to masquerade as engine failures.
+export const DEFAULT_ENDPOINT = 'https://postman-echo.com/post';
 const FLAKY_ENDPOINT = 'https://httpbin.org/status/500,200';
 
 export type FieldJobKind = 'status' | 'standard' | 'photo' | 'flaky';
@@ -45,32 +48,37 @@ const KINDS: Record<FieldJobKind, { workflow: string; activity: string; priority
   flaky: { workflow: 'field.flaky', activity: 'field.flaky.send', priority: 40, label: 'flaky delivery (40)' },
 };
 
-export interface FieldQueueRow {
-  taskId: string;
-  activityName: string;
-  status: string;
-  attempts: number;
-  scheduledFor?: number;
-  priority: number;
-  jobId: string;
-}
-
-export interface FieldDelivery {
+/** Everything the library knows about one job, in one row. */
+export interface FieldJobRow {
   jobId: string;
   kind: string;
-  httpStatus: number;
+  priority: number;
+  createdAt: number;
+  /** Lifecycle phase, derived from execution + task + DLQ state. */
+  phase: 'waiting' | 'held' | 'backoff' | 'active' | 'delivered' | 'dead';
   attempts: number;
-  deliveredAt: number;
+  maxAttempts: number;
+  /** For pending tasks: when the engine will look at it again. */
+  nextAttemptAt?: number;
+  /** Most recent recorded failure or skip, verbatim from the task. */
+  lastError?: { kind: 'failure' | 'skip'; message: string; at: number };
+  /** Delivery proof, when phase === 'delivered'. */
+  deliveredAt?: number;
+  httpStatus?: number;
+  /** Set when phase === 'dead' — enables inline force retry. */
+  deadLetterId?: string;
 }
 
 export interface FieldView {
   online: boolean;
   engineRunning: boolean;
   endpoint: string;
-  queue: FieldQueueRow[];
-  delivered: FieldDelivery[];
+  jobs: FieldJobRow[];
+  liveCount: number;
   deliveredTotal: number;
-  deadLetters: DeadLetterRecord[];
+  deadTotal: number;
+  /** Recent engine log lines (newest last) — the library, narrating itself. */
+  logs: string[];
   lastEvent: string | null;
 }
 
@@ -102,7 +110,7 @@ export class FieldTestSession {
         name: spec.activity,
         priority: spec.priority,
         startToCloseTimeout: 20000,
-        retry: { maximumAttempts: 8, initialInterval: 2000 },
+        retry: { maximumAttempts: MAX_ATTEMPTS, initialInterval: 2000 },
         // REAL connectivity gate: while the radio is off this holds —
         // attempts stay at 0. That is the hold-vs-fail distinction.
         runWhen: rc => (rc.isConnected ? { ready: true } : { ready: false, reason: 'offline (real)', retryInMs: 500 }),
@@ -209,10 +217,11 @@ export class FieldTestSession {
 
   async view(): Promise<FieldView> {
     const client = this.required();
-    const [pending, active, completedTasks, deadLetters] = await Promise.all([
+    const [pending, active, completedTasks, failedTasks, deadLetters] = await Promise.all([
       client.storage.getActivityTasksByStatus('pending'),
       client.storage.getActivityTasksByStatus('active'),
       client.storage.getActivityTasksByStatus('completed'),
+      client.storage.getActivityTasksByStatus('failed'),
       client.storage.getDeadLetters(),
     ]);
 
@@ -220,42 +229,73 @@ export class FieldTestSession {
     const executions = (await Promise.all(
       statuses.map(s => client.storage.getExecutionsByStatus(s))
     )).flat() as WorkflowExecution[];
-    const metaByRun = new Map(executions.map(e => [e.runId, (e.metadata ?? {}) as Record<string, unknown>]));
 
-    const toRow = (task: ActivityTask): FieldQueueRow => ({
-      taskId: task.taskId,
-      activityName: task.activityName,
-      status: task.status,
-      attempts: task.attempts,
-      scheduledFor: task.scheduledFor,
-      priority: KINDS[String(metaByRun.get(task.runId)?.kind) as FieldJobKind]?.priority ?? 0,
-      jobId: String(metaByRun.get(task.runId)?.jobId ?? task.runId.slice(0, 8)),
+    const taskByRun = new Map<string, ActivityTask>();
+    for (const task of [...pending, ...active, ...completedTasks, ...failedTasks] as ActivityTask[]) {
+      taskByRun.set(task.runId, task);
+    }
+    const deadLetterByRun = new Map(
+      (deadLetters as DeadLetterRecord[]).map(deadLetter => [deadLetter.runId, deadLetter])
+    );
+
+    const jobs: FieldJobRow[] = executions.map(execution => {
+      const meta = (execution.metadata ?? {}) as Record<string, unknown>;
+      const task = taskByRun.get(execution.runId);
+      const deadLetter = deadLetterByRun.get(execution.runId);
+      const lastHistory = task?.errorHistory?.[task.errorHistory.length - 1];
+
+      let phase: FieldJobRow['phase'] = 'waiting';
+      if (deadLetter) phase = 'dead';
+      else if (task?.status === 'completed') phase = 'delivered';
+      else if (task?.status === 'active') phase = 'active';
+      else if (task?.status === 'pending') {
+        if (lastHistory?.kind === 'skip') phase = 'held';
+        else if ((task.attempts ?? 0) > 0) phase = 'backoff';
+        else phase = 'waiting';
+      }
+
+      return {
+        jobId: String(meta.jobId ?? execution.runId.slice(0, 8)),
+        kind: String(meta.kind ?? 'standard'),
+        priority: Number(meta.priority ?? 0),
+        createdAt: execution.createdAt,
+        phase,
+        attempts: deadLetter?.attempts ?? task?.attempts ?? 0,
+        maxAttempts: MAX_ATTEMPTS,
+        nextAttemptAt: task?.status === 'pending' ? task.scheduledFor : undefined,
+        lastError: deadLetter
+          ? { kind: 'failure', message: deadLetter.error, at: deadLetter.failedAt }
+          : lastHistory
+            ? { kind: lastHistory.kind, message: lastHistory.message, at: lastHistory.at }
+            : undefined,
+        deliveredAt:
+          task?.result && typeof task.result.deliveredAt === 'number' ? Number(task.result.deliveredAt) : undefined,
+        httpStatus:
+          task?.result && task.result.httpStatus !== undefined ? Number(task.result.httpStatus) : undefined,
+        deadLetterId: deadLetter?.id,
+      };
     });
 
-    const queue = [...(pending as ActivityTask[]), ...(active as ActivityTask[])]
-      .map(toRow)
-      .sort((a, b) => b.priority - a.priority || (a.scheduledFor ?? 0) - (b.scheduledFor ?? 0));
-
-    const deliveredAll = (completedTasks as ActivityTask[])
-      .filter(task => task.result && typeof task.result.deliveredAt === 'number')
-      .map(task => ({
-        jobId: String(metaByRun.get(task.runId)?.jobId ?? task.runId.slice(0, 8)),
-        kind: String(metaByRun.get(task.runId)?.kind ?? 'standard'),
-        httpStatus: Number(task.result!.httpStatus ?? 0),
-        attempts: task.attempts,
-        deliveredAt: Number(task.result!.deliveredAt),
-      }))
-      .sort((a, b) => b.deliveredAt - a.deliveredAt);
+    // Live work first (priority desc, oldest first); finished work after,
+    // newest first — so the top of the list is always "what's happening".
+    const phaseRank = (job: FieldJobRow) => (job.phase === 'delivered' || job.phase === 'dead' ? 1 : 0);
+    jobs.sort((a, b) => {
+      const rank = phaseRank(a) - phaseRank(b);
+      if (rank !== 0) return rank;
+      if (phaseRank(a) === 0) return b.priority - a.priority || a.createdAt - b.createdAt;
+      return (b.deliveredAt ?? b.createdAt) - (a.deliveredAt ?? a.createdAt);
+    });
 
     const lastLine = client.parityLogs[client.parityLogs.length - 1];
     return {
       online: this.online,
       engineRunning: true,
       endpoint: this.endpoint,
-      queue,
-      delivered: deliveredAll.slice(0, 12),
-      deliveredTotal: deliveredAll.length,
-      deadLetters: deadLetters as DeadLetterRecord[],
+      jobs,
+      liveCount: jobs.filter(job => phaseRank(job) === 0).length,
+      deliveredTotal: jobs.filter(job => job.phase === 'delivered').length,
+      deadTotal: jobs.filter(job => job.phase === 'dead').length,
+      logs: client.parityLogs.slice(-15),
       lastEvent: lastLine ?? null,
     };
   }

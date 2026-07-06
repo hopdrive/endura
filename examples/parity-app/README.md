@@ -21,7 +21,7 @@ that break hand-rolled queues.
 - **Field Test** — the UN-simulated counterpart, built for a physical phone:
   a production-style engine (real tick loop) over a database that is never
   reset between launches, real connectivity from the radio (expo-network),
-  and real HTTP deliveries to the real internet (httpbin.org by default, or
+  and real HTTP deliveries to the real internet (postman-echo.com by default, or
   paste a webhook.site URL and watch jobs land on your laptop). Guided
   missions: baseline delivery → airplane-mode hold & priority flush →
   backgrounding → force quit & relaunch → real server 500s driving real
