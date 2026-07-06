@@ -227,6 +227,35 @@ describe('schema migrations (C8)', () => {
     await storage.close();
   });
 
+  it('migrates dead_letters to carry the non-retryable flag (v3)', async () => {
+    const driver = await createPopulatedV1Db();
+    const storage = new SQLiteStorage(driver);
+    await storage.initialize();
+
+    // Legacy rows default to retryable.
+    const legacy = (await storage.getDeadLetters()).find(d => d.id === 'dl-1');
+    expect(legacy?.nonRetryable).toBe(false);
+
+    // New records round-trip the flag.
+    await storage.saveDeadLetter({
+      id: 'dl-2',
+      runId: 'run-1',
+      taskId: 'task-1',
+      activityName: 'upload',
+      workflowName: 'photoUpload',
+      input: {},
+      error: 'row filter rejected',
+      attempts: 1,
+      failedAt: 2000,
+      acknowledged: false,
+      nonRetryable: true,
+    });
+    const saved = (await storage.getDeadLetters()).find(d => d.id === 'dl-2');
+    expect(saved?.nonRetryable).toBe(true);
+
+    await storage.close();
+  });
+
   it('refuses to open a database from a newer package version', async () => {
     const driver = await createPopulatedV1Db();
     await driver.execute(`PRAGMA user_version = ${SCHEMA_VERSION + 1}`);

@@ -50,6 +50,8 @@ export {
   WorkflowNotFoundError,
   ExecutionNotFoundError,
   ActivityTimeoutError,
+  NonRetryableError,
+  isNonRetryableError,
 } from './types';
 
 // Definitions

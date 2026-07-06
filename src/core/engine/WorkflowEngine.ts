@@ -25,6 +25,7 @@ import {
   ExecutionNotFoundError,
   ActivityTimeoutError,
   RunConditionFn,
+  isNonRetryableError,
 } from '../types';
 import { generateId, mergeState, calculateBackoffDelay, silentLogger, createAbortController } from '../utils';
 import { conditions } from '../conditions';
@@ -904,7 +905,7 @@ export class WorkflowEngine {
     // count and includes claims lost to crashes.
     const failures = (task.failures ?? 0) + 1;
 
-    if (failures < task.maxAttempts) {
+    if (failures < task.maxAttempts && !isNonRetryableError(error)) {
       // Schedule retry with backoff
       const retryOpts = activity.options?.retry ?? {};
       const delay = calculateBackoffDelay(
@@ -986,6 +987,7 @@ export class WorkflowEngine {
         attempts: task.attempts,
         failedAt: now,
         acknowledged: false,
+        nonRetryable: isNonRetryableError(error),
       };
       await this.storage.saveDeadLetter(deadLetter);
 

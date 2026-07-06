@@ -135,6 +135,12 @@ export interface DeadLetterRecord {
   failedAt: number;
   /** Has this been reviewed/handled? */
   acknowledged: boolean;
+  /**
+   * True when the failure was a NonRetryableError (permanent refusal)
+   * rather than an exhausted retry budget. Recovery UIs can use this to
+   * suppress the Force Retry affordance.
+   */
+  nonRetryable?: boolean;
 }
 
 // ============================================================================
@@ -527,4 +533,35 @@ export class ActivityTimeoutError extends Error {
     super(`Activity '${taskId}' timed out after ${timeout}ms`);
     this.name = 'ActivityTimeoutError';
   }
+}
+
+/**
+ * Throw from an activity to fail permanently without burning the
+ * remaining retry budget: the task dead-letters immediately and the
+ * dead letter is flagged nonRetryable. Use for permanent refusals
+ * (validation rejections, authorization failures) where retrying can
+ * never succeed.
+ */
+export class NonRetryableError extends Error {
+  readonly nonRetryable = true;
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'NonRetryableError';
+  }
+}
+
+/**
+ * True when an error should skip the retry budget. Matches
+ * NonRetryableError instances and any error carrying `nonRetryable:
+ * true` — the duck-typed check keeps classification working across
+ * bundle copies and for consumer-defined error hierarchies.
+ */
+export function isNonRetryableError(error: unknown): boolean {
+  if (error instanceof NonRetryableError) return true;
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    (error as { nonRetryable?: unknown }).nonRetryable === true
+  );
 }

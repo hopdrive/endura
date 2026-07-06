@@ -177,6 +177,7 @@ export class SQLiteStorage implements Storage {
       attempts: row['attempts'] as number,
       failedAt: row['failed_at'] as number,
       acknowledged: (row['acknowledged'] as number) === 1,
+      nonRetryable: (row['non_retryable'] as number) === 1,
     };
   }
 
@@ -493,8 +494,8 @@ export class SQLiteStorage implements Storage {
 
     await this.driver.execute(
       `INSERT OR REPLACE INTO dead_letters (
-        id, run_id, task_id, activity_name, workflow_name, input, error, error_stack, attempts, failed_at, acknowledged
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        id, run_id, task_id, activity_name, workflow_name, input, error, error_stack, attempts, failed_at, acknowledged, non_retryable
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         record.id,
         record.runId,
@@ -507,6 +508,7 @@ export class SQLiteStorage implements Storage {
         record.attempts,
         record.failedAt,
         record.acknowledged ? 1 : 0,
+        record.nonRetryable ? 1 : 0,
       ]
     );
 

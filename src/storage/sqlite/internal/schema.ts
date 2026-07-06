@@ -80,7 +80,8 @@ CREATE TABLE IF NOT EXISTS dead_letters (
   error_stack TEXT,
   attempts INTEGER NOT NULL,
   failed_at INTEGER NOT NULL,
-  acknowledged INTEGER NOT NULL DEFAULT 0
+  acknowledged INTEGER NOT NULL DEFAULT 0,
+  non_retryable INTEGER NOT NULL DEFAULT 0
 );
 
 -- Index for unacknowledged dead letters
@@ -111,8 +112,9 @@ export function getSchemaStatements(): string[] {
  *   report user_version 0 and are treated as v1.
  * - v2: activity_tasks gains failures, owner_id, lease_expires_at; the
  *   executions unique index is rebuilt scoped to status='running'.
+ * - v3: dead_letters gains non_retryable (M1 failure classification).
  */
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 /**
  * A single schema migration. Statements run in order inside one
@@ -137,6 +139,12 @@ export const MIGRATIONS: Migration[] = [
       `ALTER TABLE activity_tasks ADD COLUMN lease_expires_at INTEGER;`,
       `DROP INDEX IF EXISTS idx_executions_unique_key;`,
       `CREATE UNIQUE INDEX IF NOT EXISTS idx_executions_unique_key_running ON executions(workflow_name, unique_key) WHERE unique_key IS NOT NULL AND status = 'running';`,
+    ],
+  },
+  {
+    toVersion: 3,
+    statements: [
+      `ALTER TABLE dead_letters ADD COLUMN non_retryable INTEGER NOT NULL DEFAULT 0;`,
     ],
   },
 ];
