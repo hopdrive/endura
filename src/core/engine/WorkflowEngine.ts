@@ -789,6 +789,20 @@ export class WorkflowEngine {
     // task) must commit atomically — a crash between them strands the
     // workflow 'running' with no frontier task.
     await this.storage.transaction(async () => {
+      // Terminal states are sticky: if the execution left 'running'
+      // while this activity was in flight (cancelled from another
+      // engine/context), discard the late success — writing the task
+      // would resurrect rows cancelExecution deleted.
+      const execution = await this.storage.getExecution(task.runId);
+      if (!execution || execution.status !== 'running') {
+        this.logger.debug('Discarding late success for non-running execution', {
+          taskId: task.taskId,
+          runId: task.runId,
+          status: execution?.status ?? 'missing',
+        });
+        return;
+      }
+
       await this.storage.saveActivityTask(completedTask);
 
       // Call onSuccess callback
@@ -826,6 +840,16 @@ export class WorkflowEngine {
     const execution = await this.storage.getExecution(completedTask.runId);
     if (!execution) {
       this.logger.error('Execution not found for completed task', { runId: completedTask.runId });
+      return;
+    }
+
+    // Sticky terminal states: never advance an execution that is no
+    // longer running (cancelled/failed/completed while in flight).
+    if (execution.status !== 'running') {
+      this.logger.debug('Not advancing non-running execution', {
+        runId: execution.runId,
+        status: execution.status,
+      });
       return;
     }
 
@@ -948,6 +972,20 @@ export class WorkflowEngine {
   private async handleTaskFailure(task: ActivityTask, activity: Activity, error: Error): Promise<void> {
     const now = this.clock.now();
 
+    // Terminal states are sticky: a failure landing after the execution
+    // left 'running' (typically the abort triggered by cancelExecution,
+    // or a late settlement from another engine) must not schedule a
+    // retry — that would resurrect task rows the cancel deleted.
+    const execution = await this.storage.getExecution(task.runId);
+    if (!execution || execution.status !== 'running') {
+      this.logger.debug('Discarding late failure for non-running execution', {
+        taskId: task.taskId,
+        runId: task.runId,
+        status: execution?.status ?? 'missing',
+      });
+      return;
+    }
+
     // Call onFailure callback
     if (activity.options?.onFailure) {
       try {
@@ -1002,6 +1040,19 @@ export class WorkflowEngine {
   private async handleTaskPermanentFailure(task: ActivityTask, error: Error): Promise<void> {
     const now = this.clock.now();
     const execution = await this.storage.getExecution(task.runId);
+
+    // Terminal states are sticky: never flip a cancelled/completed/failed
+    // execution to failed or dead-letter its tasks. (A missing execution
+    // still dead-letters below — the DLQ entry is the only trace left.)
+    if (execution && execution.status !== 'running') {
+      this.logger.debug('Discarding late permanent failure for non-running execution', {
+        taskId: task.taskId,
+        runId: task.runId,
+        status: execution.status,
+      });
+      return;
+    }
+
     const workflow = execution ? this.workflows.get(execution.workflowName) : null;
     const activity = this.activities.get(task.activityName);
 
@@ -1116,6 +1167,18 @@ export class WorkflowEngine {
   private async handleTaskHeld(task: ActivityTask): Promise<void> {
     const now = this.clock.now();
 
+    // Sticky terminal states: don't resurrect task rows for an
+    // execution that left 'running' while this claim was in flight.
+    const execution = await this.storage.getExecution(task.runId);
+    if (!execution || execution.status !== 'running') {
+      this.logger.debug('Not holding task for non-running execution', {
+        taskId: task.taskId,
+        runId: task.runId,
+        status: execution?.status ?? 'missing',
+      });
+      return;
+    }
+
     const heldTask: ActivityTask = {
       ...task,
       status: 'pending',
@@ -1148,6 +1211,19 @@ export class WorkflowEngine {
    */
   private async handleTaskSkipped(task: ActivityTask, reason: string): Promise<void> {
     const now = this.clock.now();
+
+    // Sticky terminal states: don't resurrect task rows for an
+    // execution that left 'running' while this claim was in flight.
+    const execution = await this.storage.getExecution(task.runId);
+    if (!execution || execution.status !== 'running') {
+      this.logger.debug('Not rescheduling skipped task for non-running execution', {
+        taskId: task.taskId,
+        runId: task.runId,
+        status: execution?.status ?? 'missing',
+      });
+      return;
+    }
+
     const activity = this.activities.get(task.activityName);
 
     // Reschedule for later (default 30 seconds)
