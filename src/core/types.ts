@@ -248,6 +248,13 @@ export interface RetryPolicy {
   backoffCoefficient?: number;
   /** Cap on retry delay (default: none) */
   maximumInterval?: number;
+  /**
+   * Jitter applied to the computed delay so a burst of failures does
+   * not reschedule every task onto the same instant.
+   * 'equal' = uniform in [delay/2, delay]; 'full' = uniform in [0, delay].
+   * @default 'equal'
+   */
+  jitter?: 'none' | 'equal' | 'full';
 }
 
 /**
@@ -441,6 +448,13 @@ export interface WorkflowEngineConfig {
    * @default 65536
    */
   stateSizeWarnBytes?: number;
+  /**
+   * Random source for retry-backoff jitter. Inject a fixed value in
+   * tests for deterministic scheduling (`() => 1` reproduces the
+   * un-jittered upper bound).
+   * @default Math.random
+   */
+  random?: () => number;
 }
 
 // ============================================================================

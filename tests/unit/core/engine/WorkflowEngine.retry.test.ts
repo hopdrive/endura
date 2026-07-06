@@ -36,6 +36,7 @@ describe('WorkflowEngine - Retries + Backoff', () => {
       clock,
       scheduler,
       environment,
+      random: () => 1, // pin jitter to its upper bound for exact timing
     });
   }
 

@@ -95,6 +95,7 @@ export class WorkflowEngine {
   private ownerId: string = generateId();
   private leaseDurationMs: number;
   private stateSizeWarnBytes: number;
+  private random: () => number;
 
   // Track active AbortControllers by runId for cancellation propagation
   private activeAbortControllers: Map<string, { abort: (reason?: unknown) => void }> = new Map();
@@ -109,6 +110,7 @@ export class WorkflowEngine {
     this.cleanup = config.cleanup;
     this.leaseDurationMs = config.leaseDurationMs ?? DEFAULT_LEASE_MS;
     this.stateSizeWarnBytes = config.stateSizeWarnBytes ?? DEFAULT_STATE_SIZE_WARN_BYTES;
+    this.random = config.random ?? Math.random;
   }
 
   /**
@@ -1093,7 +1095,8 @@ export class WorkflowEngine {
         failures,
         retryOpts.initialInterval ?? DEFAULT_INITIAL_INTERVAL,
         retryOpts.backoffCoefficient ?? DEFAULT_BACKOFF_COEFFICIENT,
-        retryOpts.maximumInterval
+        retryOpts.maximumInterval,
+        { jitter: retryOpts.jitter ?? 'equal', random: this.random }
       );
 
       const retriedTask: ActivityTask = {

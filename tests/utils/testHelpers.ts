@@ -97,6 +97,9 @@ export async function createTestContext(
     scheduler,
     environment,
     onEvent: options?.onEvent,
+    // Pin backoff jitter to its upper bound so retry timing stays exact
+    // and deterministic in tests.
+    random: () => 1,
   });
 
   return { storage, clock, scheduler, environment, engine };

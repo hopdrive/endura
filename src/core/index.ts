@@ -77,6 +77,7 @@ export {
   generateId,
   setIdGenerator,
   calculateBackoffDelay,
+  JitterMode,
   mergeState,
   approxJsonBytes,
   createAbortController,
