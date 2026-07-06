@@ -16,6 +16,8 @@ import { ScenarioDefinition, ScenarioController, ScenarioResult } from './types'
 export interface HarnessClient {
   engine: unknown;
   storage: HarnessStorage;
+  /** Present on ExpoWorkflowClient — used to push connectivity changes instantly (NetInfo-listener pattern). */
+  environment?: { setNetworkState?: (connected: boolean) => void };
   stop(): void;
   close(): Promise<void> | void;
   start(options?: { lifespan?: number; tickInterval?: number }): Promise<void>;
@@ -126,6 +128,7 @@ export async function runScenario<TClient extends HarnessClient>(
   await platform.deleteDatabase(dbName);
 
   let client = await platform.createClient(dbName, () => connectivity.online);
+  client.environment?.setNetworkState?.(connectivity.online);
   let foregroundLoop: Promise<void> | null = null;
 
   const startForeground = () => {
@@ -143,6 +146,10 @@ export async function runScenario<TClient extends HarnessClient>(
     setOnline(online: boolean) {
       connectivity.online = online;
       server.online = online;
+      // Push into the engine environment immediately (the NetInfo-
+      // listener pattern) — the polled provider alone leaves runWhen
+      // gates up to a poll interval stale (P4-005).
+      client.environment?.setNetworkState?.(online);
       controller.log(`connectivity → ${online ? 'ONLINE' : 'OFFLINE'}`);
     },
     isOnline: () => connectivity.online,
@@ -150,12 +157,14 @@ export async function runScenario<TClient extends HarnessClient>(
       controller.log('simulating app restart (close + reopen over same database)');
       await client.close();
       client = await platform.createClient(dbName, () => connectivity.online);
+      client.environment?.setNetworkState?.(connectivity.online);
       scenario.register(client, ctx);
       startForeground();
     },
     async backgroundWake(lifespanMs: number) {
       controller.log(`simulating background wake (second engine, lifespan ${lifespanMs}ms)`);
       const background = await platform.createClient(dbName, () => connectivity.online);
+      background.environment?.setNetworkState?.(connectivity.online);
       scenario.register(background, ctx);
       try {
         await background.start({ lifespan: lifespanMs });

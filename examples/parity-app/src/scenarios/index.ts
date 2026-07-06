@@ -8,6 +8,8 @@ import { moveSyncPermanentFailure } from './moveSyncPermanentFailure';
 import { recoveryAgeGate } from './recoveryAgeGate';
 import { nonRecoverablePipeline } from './nonRecoverablePipeline';
 import { offerBundleDedupe } from './offerBundleDedupe';
+import { offlineHoldResume } from './offlineHoldResume';
+import { offlineMidStage } from './offlineMidStage';
 
 /**
  * Scenario registry. Parity scenarios (categories 1-14 from the review)
@@ -23,4 +25,6 @@ export const scenarios: ParityScenario<ParityClient>[] = [
   recoveryAgeGate,
   nonRecoverablePipeline,
   offerBundleDedupe,
+  offlineHoldResume,
+  offlineMidStage,
 ];
