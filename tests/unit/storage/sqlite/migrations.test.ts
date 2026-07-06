@@ -298,6 +298,24 @@ describe('schema migrations (C8)', () => {
     await storage.close();
   });
 
+  it('migrates executions to carry metadata (v6)', async () => {
+    const driver = await createPopulatedV1Db();
+    const storage = new SQLiteStorage(driver);
+    await storage.initialize();
+
+    // Legacy rows have no metadata.
+    const legacy = await storage.getExecution('run-1');
+    expect(legacy?.metadata).toBeUndefined();
+
+    // New writes round-trip metadata, and the scoped query sees them.
+    await storage.saveExecution({ ...legacy!, metadata: { moveId: 7 } });
+    expect((await storage.getExecution('run-1'))?.metadata).toEqual({ moveId: 7 });
+    const scoped = await storage.getExecutions({ workflowName: 'photoUpload', status: 'running' });
+    expect(scoped.map(x => x.runId)).toEqual(['run-1']);
+
+    await storage.close();
+  });
+
   it('refuses to open a database from a newer package version', async () => {
     const driver = await createPopulatedV1Db();
     await driver.execute(`PRAGMA user_version = ${SCHEMA_VERSION + 1}`);

@@ -44,6 +44,12 @@ export interface WorkflowExecution {
   input: Record<string, unknown>;
   /** Accumulated state (input + activity returns merged) */
   state: Record<string, unknown>;
+  /**
+   * Opaque caller-provided grouping/scoping data set at start (e.g.
+   * { moveId } so a recovery screen can group executions per move).
+   * Never read by the engine.
+   */
+  metadata?: Record<string, unknown>;
 
   /** Unix timestamp ms - when created */
   createdAt: number;
@@ -332,6 +338,8 @@ export interface StartWorkflowOptions<TInput = Record<string, unknown>> {
   uniqueKey?: string;
   /** How to handle uniqueness conflicts */
   onConflict?: 'throw' | 'ignore';
+  /** Opaque grouping/scoping data stored on the execution (see WorkflowExecution.metadata) */
+  metadata?: Record<string, unknown>;
 }
 
 /**
@@ -474,6 +482,21 @@ export interface StorageChange {
 }
 
 /**
+ * Scoped, paginated execution query. Results are ordered newest first
+ * (createdAt DESC).
+ */
+export interface ExecutionQuery {
+  /** Only these statuses (single value or list) */
+  status?: WorkflowExecutionStatus | WorkflowExecutionStatus[];
+  /** Only this workflow */
+  workflowName?: string;
+  /** Page size (default 100) */
+  limit?: number;
+  /** Page start (default 0) */
+  offset?: number;
+}
+
+/**
  * Storage adapter interface.
  */
 export interface Storage {
@@ -481,6 +504,7 @@ export interface Storage {
   saveExecution(execution: WorkflowExecution): Promise<void>;
   getExecution(runId: string): Promise<WorkflowExecution | null>;
   getExecutionsByStatus(status: WorkflowExecutionStatus): Promise<WorkflowExecution[]>;
+  getExecutions(query: ExecutionQuery): Promise<WorkflowExecution[]>;
   deleteExecution(runId: string): Promise<void>;
 
   // Uniqueness

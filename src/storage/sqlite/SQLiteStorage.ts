@@ -12,6 +12,7 @@ import {
   ActivityTaskStatus,
   DeadLetterRecord,
   TaskErrorHistoryEntry,
+  ExecutionQuery,
 } from '../../core/types';
 import { SQLiteDriver, SQLiteRow } from './internal/SQLiteDriver';
 import { getSchemaStatements, MIGRATIONS, SCHEMA_VERSION } from './internal/schema';
@@ -158,6 +159,7 @@ export class SQLiteStorage implements Storage {
       status: row['status'] as WorkflowExecutionStatus,
       input: this.safeJsonParse(row['input']),
       state: this.safeJsonParse(row['state']),
+      metadata: row['metadata'] != null ? this.safeJsonParse(row['metadata']) : undefined,
       createdAt: row['created_at'] as number,
       updatedAt: row['updated_at'] as number,
       completedAt: row['completed_at'] != null ? Number(row['completed_at']) : undefined,
@@ -233,8 +235,8 @@ export class SQLiteStorage implements Storage {
     await this.driver.execute(
       `INSERT INTO executions (
         run_id, workflow_name, workflow_version, unique_key, current_activity_index, current_activity_name,
-        status, input, state, created_at, updated_at, completed_at, error, failed_activity_name
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        status, input, state, metadata, created_at, updated_at, completed_at, error, failed_activity_name
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(run_id) DO UPDATE SET
         workflow_name = excluded.workflow_name,
         workflow_version = excluded.workflow_version,
@@ -244,6 +246,7 @@ export class SQLiteStorage implements Storage {
         status = excluded.status,
         input = excluded.input,
         state = excluded.state,
+        metadata = excluded.metadata,
         created_at = excluded.created_at,
         updated_at = excluded.updated_at,
         completed_at = excluded.completed_at,
@@ -259,6 +262,7 @@ export class SQLiteStorage implements Storage {
         execution.status,
         JSON.stringify(execution.input),
         JSON.stringify(execution.state),
+        execution.metadata ? JSON.stringify(execution.metadata) : null,
         execution.createdAt,
         execution.updatedAt,
         execution.completedAt ?? null,
@@ -288,6 +292,31 @@ export class SQLiteStorage implements Storage {
     const rows = await this.driver.query(
       `SELECT * FROM executions WHERE status = ?`,
       [status]
+    );
+
+    return rows.map(row => this.rowToExecution(row));
+  }
+
+  async getExecutions(query: ExecutionQuery): Promise<WorkflowExecution[]> {
+    const statuses = query.status === undefined ? null : ([] as string[]).concat(query.status);
+    const limit = query.limit ?? 100;
+    const offset = query.offset ?? 0;
+
+    const clauses: string[] = [];
+    const params: unknown[] = [];
+    if (statuses && statuses.length > 0) {
+      clauses.push(`status IN (${statuses.map(() => '?').join(', ')})`);
+      params.push(...statuses);
+    }
+    if (query.workflowName) {
+      clauses.push(`workflow_name = ?`);
+      params.push(query.workflowName);
+    }
+
+    const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
+    const rows = await this.driver.query(
+      `SELECT * FROM executions ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+      [...params, limit, offset]
     );
 
     return rows.map(row => this.rowToExecution(row));

@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS executions (
   status TEXT NOT NULL CHECK(status IN ('running', 'completed', 'failed', 'cancelled')),
   input TEXT NOT NULL,
   state TEXT NOT NULL,
+  metadata TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   completed_at INTEGER,
@@ -27,6 +28,10 @@ CREATE TABLE IF NOT EXISTS executions (
 
 -- Index for querying by status
 CREATE INDEX IF NOT EXISTS idx_executions_status ON executions(status);
+
+-- Index for scoped inspection queries (workflow + status, newest first)
+CREATE INDEX IF NOT EXISTS idx_executions_workflow_status
+  ON executions(workflow_name, status, created_at DESC);
 
 -- Unique key constraint: at most one RUNNING execution per key. Scoped to
 -- status='running' so completed/failed history neither blocks key reuse
@@ -117,8 +122,9 @@ export function getSchemaStatements(): string[] {
  * - v3: dead_letters gains non_retryable (M1 failure classification).
  * - v4: executions gains workflow_version (H7 upgrade-skew detection).
  * - v5: activity_tasks gains error_history (M2 attempt/skip history).
+ * - v6: executions gains metadata; scoped-inspection index (M6).
  */
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 
 /**
  * A single schema migration. Statements run in order inside one
@@ -161,6 +167,13 @@ export const MIGRATIONS: Migration[] = [
     toVersion: 5,
     statements: [
       `ALTER TABLE activity_tasks ADD COLUMN error_history TEXT;`,
+    ],
+  },
+  {
+    toVersion: 6,
+    statements: [
+      `ALTER TABLE executions ADD COLUMN metadata TEXT;`,
+      `CREATE INDEX IF NOT EXISTS idx_executions_workflow_status ON executions(workflow_name, status, created_at DESC);`,
     ],
   },
 ];

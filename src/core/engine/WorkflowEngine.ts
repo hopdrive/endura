@@ -27,6 +27,7 @@ import {
   RunConditionFn,
   isNonRetryableError,
   TaskErrorHistoryEntry,
+  ExecutionQuery,
 } from '../types';
 import { generateId, mergeState, calculateBackoffDelay, silentLogger, createAbortController } from '../utils';
 import { conditions } from '../conditions';
@@ -314,6 +315,7 @@ export class WorkflowEngine {
       status: 'running',
       input: options.input as Record<string, unknown>,
       state: options.input as Record<string, unknown>,
+      metadata: options.metadata,
       createdAt: now,
       updatedAt: now,
     };
@@ -423,6 +425,13 @@ export class WorkflowEngine {
    */
   async getExecutionsByStatus(status: WorkflowExecutionStatus): Promise<WorkflowExecution[]> {
     return this.storage.getExecutionsByStatus(status);
+  }
+
+  /**
+   * Scoped, paginated execution query (newest first). See ExecutionQuery.
+   */
+  async getExecutions(query: ExecutionQuery = {}): Promise<WorkflowExecution[]> {
+    return this.storage.getExecutions(query);
   }
 
   /**

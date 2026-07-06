@@ -208,6 +208,10 @@ export class ExpoWorkflowClient {
     return this.engine.getExecutionsByStatus.bind(this.engine);
   }
 
+  get getExecutions() {
+    return this.engine.getExecutions.bind(this.engine);
+  }
+
   get cancelExecution() {
     return this.engine.cancelExecution.bind(this.engine);
   }
