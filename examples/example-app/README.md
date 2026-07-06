@@ -61,6 +61,8 @@ inspector, with swipeable tabs:
 
 ## Running it
 
+### Quick start (Expo Go + dev server)
+
 ```bash
 # from the repo root: build + pack endura, install into the app
 npm run build && npm pack --pack-destination /tmp
@@ -70,20 +72,32 @@ npm install
 npx expo start
 ```
 
-Open in Expo Go (iOS or Android).
+Scan the QR with Expo Go (iOS or Android). This demos everything except one
+scenario: relaunching the app **while still offline** (a dev bundle can't be
+re-fetched without a network).
 
-### Without a dev server (field testing)
+### Full offline testing (publish to your own Expo account)
 
-Airplane-mode and force-quit tests can't depend on Metro — a dev bundle can't
-be re-fetched while offline. Publish the bundle instead and Expo Go loads it
-from the CDN and relaunches it from its cache:
+Airplane-mode + force-quit + relaunch needs the bundle cached on the device
+instead of served by Metro. Publish it to your own (free) Expo account with
+EAS Update — Expo Go then loads it from the CDN and relaunches it from cache,
+no computer involved:
 
 ```bash
-npx eas-cli update --branch demo --message "field build"
+cd examples/example-app
+npx eas-cli login              # your free expo.dev account
+npx eas-cli init               # creates the project under YOUR account
+npx eas-cli update:configure   # writes your updates.url into app.json
+npx eas-cli update --branch demo --message "my field build"
 ```
 
-Open the update once from the EAS dashboard QR; after that it launches
-without the computer.
+Open the update once from the QR on your EAS dashboard (sign into Expo Go
+with the same account); from then on it launches offline. Notes:
+
+- `eas init` / `update:configure` write your personal `projectId`, `owner`,
+  and `updates.url` into `app.json` — that's expected; don't commit them.
+- Keep `runtimeVersion.policy` as `sdkVersion` — Expo Go can only load
+  updates published with the SDK-version runtime.
 
 ## Why the parity suite matters
 
