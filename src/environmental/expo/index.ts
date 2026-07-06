@@ -19,6 +19,8 @@ export {
 export {
   WORKFLOW_BACKGROUND_TASK,
   BackgroundFetchResult,
+  BackgroundTaskResult,
+  toBackgroundTaskResult,
   BackgroundTaskOptions,
   RegisterBackgroundTaskOptions,
   runBackgroundWorkflowTask,

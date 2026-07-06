@@ -7,34 +7,42 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
+      "react-native": "./dist/index.js",
       "default": "./dist/index.js"
     },
     "./core": {
       "types": "./dist/core/index.d.ts",
+      "react-native": "./dist/core/index.js",
       "default": "./dist/core/index.js"
     },
     "./storage": {
       "types": "./dist/storage/index.d.ts",
+      "react-native": "./dist/storage/index.js",
       "default": "./dist/storage/index.js"
     },
     "./storage/sqlite": {
       "types": "./dist/storage/sqlite/index.d.ts",
+      "react-native": "./dist/storage/sqlite/index.js",
       "default": "./dist/storage/sqlite/index.js"
     },
     "./storage/memory": {
       "types": "./dist/storage/memory/index.d.ts",
+      "react-native": "./dist/storage/memory/index.js",
       "default": "./dist/storage/memory/index.js"
     },
     "./react": {
       "types": "./dist/react/index.d.ts",
+      "react-native": "./dist/react/index.js",
       "default": "./dist/react/index.js"
     },
     "./environmental/expo": {
       "types": "./dist/environmental/expo/index.d.ts",
+      "react-native": "./dist/environmental/expo/index.js",
       "default": "./dist/environmental/expo/index.js"
     },
     "./testing": {
       "types": "./dist/testing/index.d.ts",
+      "react-native": "./dist/testing/index.js",
       "default": "./dist/testing/index.js"
     }
   },
@@ -88,7 +96,7 @@
   },
   "peerDependencies": {
     "expo-crypto": ">=12.0.0",
-    "expo-sqlite": ">=13.0.0",
+    "expo-sqlite": ">=14.0.0",
     "react": ">=18.0.0"
   },
   "peerDependenciesMeta": {

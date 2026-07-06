@@ -1,7 +1,7 @@
 /**
  * Endura on-device smoke test.
  *
- * Exercises the review's missing test #13 on real Hermes + expo-sqlite:
+ * Phase 1 scenarios (review missing test #13) on real Hermes + expo-sqlite:
  * - 3-step workflow completes end-to-end (C1: transactions return values,
  *   C6: IDs mint on Hermes)
  * - kill the app mid-workflow, relaunch, workflow resumes and completes
@@ -10,6 +10,12 @@
  * - failing workflow dead-letters (DLQ)
  * - uniqueKey dedup returns the existing run
  *
+ * Phase 2 scenarios:
+ * - FORCE RETRY redrives a dead letter and the run completes (H5)
+ * - NonRetryableError dead-letters after exactly one attempt, flagged NR (M1)
+ * - CANCEL mid-step sticks: no resurrection, no extra step runs (H3)
+ * - opening a Phase 1 (schema v2) database migrates to the current schema
+ *
  * All observable state is rendered as plain text lines so Maestro can
  * assert on it.
  */
@@ -17,12 +23,16 @@
 import { useEffect, useRef, useState } from 'react';
 import { Pressable, SafeAreaView, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { openDatabaseAsync } from 'expo-sqlite';
-import { defineActivity, Workflow, ActivityContext } from 'endura';
+import { defineActivity, Workflow, ActivityContext, NonRetryableError } from 'endura';
 import { SQLiteStorage, ExpoSqliteDriver } from 'endura/storage/sqlite';
 import { ExpoWorkflowClient } from 'endura/environmental/expo';
 
 const STEP_MS = 2500;
 const LEASE_MS = 10000;
+
+// FORCE RETRY flips this so the redriven 'failing' run can succeed —
+// simulating the outage that caused the dead letter having ended.
+const flags = { failingSucceeds: false };
 
 function delay(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -88,8 +98,27 @@ async function createHarness(): Promise<Harness> {
       defineActivity({
         name: 'alwaysFails',
         retry: { maximumAttempts: 2, initialInterval: 500 },
-        execute: async (): Promise<Record<string, unknown>> => {
+        execute: async (ctx: ActivityContext): Promise<Record<string, unknown>> => {
+          if (flags.failingSucceeds) {
+            await logStep(ctx.runId, 'redriven');
+            return { recovered: true };
+          }
           throw new Error('intentional failure');
+        },
+      }),
+    ],
+  };
+
+  const nonretry: Workflow = {
+    name: 'nonretry',
+    activities: [
+      defineActivity({
+        name: 'rejected',
+        // Generous budget on purpose: NonRetryableError must ignore it
+        retry: { maximumAttempts: 5, initialInterval: 500 },
+        execute: async (ctx: ActivityContext): Promise<Record<string, unknown>> => {
+          await logStep(ctx.runId, 'nr');
+          throw new NonRetryableError('permanent refusal');
         },
       }),
     ],
@@ -111,6 +140,7 @@ async function createHarness(): Promise<Harness> {
 
   client.registerWorkflow(threeStep);
   client.registerWorkflow(failing);
+  client.registerWorkflow(nonretry);
   client.registerWorkflow(keyed);
 
   // Continuous foreground engine loop; intentionally not awaited.
@@ -126,6 +156,7 @@ export default function App() {
   const [initError, setInitError] = useState<string | null>(null);
   const [lines, setLines] = useState<string[]>([]);
   const [keyedResult, setKeyedResult] = useState<string>('');
+  const [actionResult, setActionResult] = useState<string>('');
 
   useEffect(() => {
     if (startedRef.current) return;
@@ -155,6 +186,7 @@ export default function App() {
               storage.getExecutionsByStatus('running'),
               storage.getExecutionsByStatus('completed'),
               storage.getExecutionsByStatus('failed'),
+              storage.getExecutionsByStatus('cancelled'),
             ])
           ).flat();
 
@@ -170,12 +202,17 @@ export default function App() {
               const stepInfo =
                 e.workflowName === 'threeStep'
                   ? ` s1:${byStep('step1')} s2:${byStep('step2')} s3:${byStep('step3')}`
-                  : '';
+                  : e.workflowName === 'nonretry'
+                    ? ` nr:${byStep('nr')}`
+                    : e.workflowName === 'failing'
+                      ? ` redriven:${byStep('redriven')}`
+                      : '';
               return `${e.workflowName} ${e.runId.slice(0, 6)} ${e.status.toUpperCase()} cur:${e.currentActivityName}${stepInfo}`;
             });
 
           const deadLetters = await storage.getDeadLetters();
-          next.push(`DLQ:${deadLetters.length}`);
+          const nrCount = deadLetters.filter(d => d.nonRetryable).length;
+          next.push(`DLQ:${deadLetters.length} NR:${nrCount}`);
           setLines(next);
         } catch (err) {
           setLines([`POLL ERROR: ${String(err)}`]);
@@ -197,6 +234,54 @@ export default function App() {
     if (!harness) return;
     const workflow = harness.client.engine.getWorkflow('failing')!;
     void harness.client.engine.start(workflow, { input: {} });
+  };
+
+  const startNonRetry = () => {
+    const harness = harnessRef.current;
+    if (!harness) return;
+    const workflow = harness.client.engine.getWorkflow('nonretry')!;
+    void harness.client.engine.start(workflow, { input: {} });
+  };
+
+  const forceRetry = () => {
+    const harness = harnessRef.current;
+    if (!harness) return;
+    void (async () => {
+      try {
+        const deadLetters = await harness.storage.getDeadLetters();
+        const target = deadLetters.find(d => !d.nonRetryable);
+        if (!target) {
+          setActionResult('RETRY:NO-TARGET');
+          return;
+        }
+        flags.failingSucceeds = true;
+        await harness.client.retryFromDeadLetter(target.id);
+        setActionResult('RETRY:REDRIVEN');
+      } catch (err) {
+        setActionResult(`RETRY ERROR: ${String(err)}`);
+      }
+    })();
+  };
+
+  const cancelNewestThreeStep = () => {
+    const harness = harnessRef.current;
+    if (!harness) return;
+    void (async () => {
+      try {
+        const running = await harness.storage.getExecutionsByStatus('running');
+        const target = running
+          .filter(e => e.workflowName === 'threeStep')
+          .sort((a, b) => b.createdAt - a.createdAt)[0];
+        if (!target) {
+          setActionResult('CANCEL:NO-TARGET');
+          return;
+        }
+        await harness.client.cancelExecution(target.runId);
+        setActionResult(`CANCEL:${target.runId.slice(0, 6)}`);
+      } catch (err) {
+        setActionResult(`CANCEL ERROR: ${String(err)}`);
+      }
+    })();
   };
 
   const startKeyed = () => {
@@ -239,9 +324,19 @@ export default function App() {
         <Pressable testID="start-keyed" style={styles.button} onPress={startKeyed}>
           <Text style={styles.buttonText}>START KEYED</Text>
         </Pressable>
+        <Pressable testID="start-nonretry" style={styles.button} onPress={startNonRetry}>
+          <Text style={styles.buttonText}>START NONRETRY</Text>
+        </Pressable>
+        <Pressable testID="force-retry" style={styles.button} onPress={forceRetry}>
+          <Text style={styles.buttonText}>FORCE RETRY</Text>
+        </Pressable>
+        <Pressable testID="cancel-three-step" style={styles.button} onPress={cancelNewestThreeStep}>
+          <Text style={styles.buttonText}>CANCEL 3-STEP</Text>
+        </Pressable>
       </View>
 
       {keyedResult ? <Text style={styles.line}>{keyedResult}</Text> : null}
+      {actionResult ? <Text style={styles.line}>{actionResult}</Text> : null}
 
       <ScrollView style={styles.list} testID="execution-list">
         {lines.map((line, i) => (
@@ -258,7 +353,7 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#0b1020', paddingTop: 8 },
   title: { color: '#fff', fontSize: 20, fontWeight: '700', textAlign: 'center', marginTop: 8 },
   status: { color: '#7fd67f', fontSize: 14, textAlign: 'center', marginVertical: 8 },
-  buttons: { flexDirection: 'row', justifyContent: 'center', gap: 8, marginBottom: 8 },
+  buttons: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', gap: 8, marginBottom: 8 },
   button: { backgroundColor: '#2c4bff', paddingHorizontal: 10, paddingVertical: 10, borderRadius: 8 },
   buttonText: { color: '#fff', fontSize: 12, fontWeight: '700' },
   list: { flex: 1, paddingHorizontal: 12 },

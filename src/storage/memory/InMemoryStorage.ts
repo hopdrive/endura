@@ -14,6 +14,7 @@ import {
   ActivityTask,
   ActivityTaskStatus,
   DeadLetterRecord,
+  ExecutionQuery,
 } from '../../core/types';
 
 export class InMemoryStorage implements Storage {
@@ -65,6 +66,23 @@ export class InMemoryStorage implements Storage {
       }
     }
     return results;
+  }
+
+  async getExecutions(query: ExecutionQuery): Promise<WorkflowExecution[]> {
+    const statuses = query.status === undefined ? null : ([] as WorkflowExecutionStatus[]).concat(query.status);
+    const limit = query.limit ?? 100;
+    const offset = query.offset ?? 0;
+
+    const results: WorkflowExecution[] = [];
+    for (const execution of this.executions.values()) {
+      if (statuses && !statuses.includes(execution.status)) continue;
+      if (query.workflowName && execution.workflowName !== query.workflowName) continue;
+      results.push({ ...execution });
+    }
+
+    // Newest first
+    results.sort((a, b) => b.createdAt - a.createdAt);
+    return results.slice(offset, offset + limit);
   }
 
   async deleteExecution(runId: string): Promise<void> {

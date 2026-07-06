@@ -227,6 +227,95 @@ describe('schema migrations (C8)', () => {
     await storage.close();
   });
 
+  it('migrates dead_letters to carry the non-retryable flag (v3)', async () => {
+    const driver = await createPopulatedV1Db();
+    const storage = new SQLiteStorage(driver);
+    await storage.initialize();
+
+    // Legacy rows default to retryable.
+    const legacy = (await storage.getDeadLetters()).find(d => d.id === 'dl-1');
+    expect(legacy?.nonRetryable).toBe(false);
+
+    // New records round-trip the flag.
+    await storage.saveDeadLetter({
+      id: 'dl-2',
+      runId: 'run-1',
+      taskId: 'task-1',
+      activityName: 'upload',
+      workflowName: 'photoUpload',
+      input: {},
+      error: 'row filter rejected',
+      attempts: 1,
+      failedAt: 2000,
+      acknowledged: false,
+      nonRetryable: true,
+    });
+    const saved = (await storage.getDeadLetters()).find(d => d.id === 'dl-2');
+    expect(saved?.nonRetryable).toBe(true);
+
+    await storage.close();
+  });
+
+  it('migrates executions to carry the workflow definition version (v4)', async () => {
+    const driver = await createPopulatedV1Db();
+    const storage = new SQLiteStorage(driver);
+    await storage.initialize();
+
+    // Legacy rows have no recorded version.
+    const legacy = await storage.getExecution('run-1');
+    expect(legacy?.workflowVersion).toBeUndefined();
+
+    // New executions round-trip the version.
+    await storage.saveExecution({ ...legacy!, workflowVersion: '7' });
+    expect((await storage.getExecution('run-1'))?.workflowVersion).toBe('7');
+
+    await storage.close();
+  });
+
+  it('migrates activity_tasks to carry error history (v5)', async () => {
+    const driver = await createPopulatedV1Db();
+    const storage = new SQLiteStorage(driver);
+    await storage.initialize();
+
+    // Legacy rows have no history.
+    const legacy = await storage.getActivityTask('task-1');
+    expect(legacy?.errorHistory).toBeUndefined();
+
+    // New writes round-trip the history.
+    await storage.saveActivityTask({
+      ...legacy!,
+      errorHistory: [
+        { at: 1500, kind: 'failure', message: 'boom' },
+        { at: 1600, kind: 'skip', message: 'offline' },
+      ],
+    });
+    const saved = await storage.getActivityTask('task-1');
+    expect(saved?.errorHistory).toEqual([
+      { at: 1500, kind: 'failure', message: 'boom' },
+      { at: 1600, kind: 'skip', message: 'offline' },
+    ]);
+
+    await storage.close();
+  });
+
+  it('migrates executions to carry metadata (v6)', async () => {
+    const driver = await createPopulatedV1Db();
+    const storage = new SQLiteStorage(driver);
+    await storage.initialize();
+
+    // Legacy rows have no metadata.
+    const legacy = await storage.getExecution('run-1');
+    expect(legacy?.metadata).toBeUndefined();
+
+    // New writes round-trip metadata, and the scoped query sees them.
+    await storage.saveExecution({ ...legacy!, metadata: { moveId: 7 } });
+    expect((await storage.getExecution('run-1'))?.metadata).toEqual({ moveId: 7 });
+    const scoped = await storage.getExecutions({ workflowName: 'photoUpload', status: 'running' });
+    expect(scoped.map(x => x.runId)).toEqual(['run-1']);
+
+    await storage.close();
+  });
+
   it('refuses to open a database from a newer package version', async () => {
     const driver = await createPopulatedV1Db();
     await driver.execute(`PRAGMA user_version = ${SCHEMA_VERSION + 1}`);

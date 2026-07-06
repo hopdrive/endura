@@ -73,6 +73,7 @@ export class ExpoEnvironment implements Environment {
   private cachedBatteryLevel: number | undefined;
   private cachedAppState: 'active' | 'background' | 'inactive' = 'active';
   private cachedLowPowerMode: boolean = false;
+  private refreshHandle: ReturnType<typeof setInterval> | null = null;
 
   constructor(options: ExpoEnvironmentOptions = {}) {
     this.options = options;
@@ -89,9 +90,22 @@ export class ExpoEnvironment implements Environment {
     this.refreshCachedValues();
 
     // Then refresh every second
-    setInterval(() => {
+    this.refreshHandle = setInterval(() => {
       this.refreshCachedValues();
     }, 1000);
+  }
+
+  /**
+   * Stop the background refresh loop. Must be called when the
+   * environment is discarded — every background wake creates a fresh
+   * instance, and an uncleared interval leaks forever.
+   * ExpoWorkflowClient.close() calls this automatically.
+   */
+  dispose(): void {
+    if (this.refreshHandle !== null) {
+      clearInterval(this.refreshHandle);
+      this.refreshHandle = null;
+    }
   }
 
   isNetworkAvailable(): boolean {

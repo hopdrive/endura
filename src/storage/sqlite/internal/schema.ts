@@ -11,12 +11,14 @@ export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS executions (
   run_id TEXT PRIMARY KEY NOT NULL,
   workflow_name TEXT NOT NULL,
+  workflow_version TEXT,
   unique_key TEXT,
   current_activity_index INTEGER NOT NULL DEFAULT 0,
   current_activity_name TEXT NOT NULL,
   status TEXT NOT NULL CHECK(status IN ('running', 'completed', 'failed', 'cancelled')),
   input TEXT NOT NULL,
   state TEXT NOT NULL,
+  metadata TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   completed_at INTEGER,
@@ -26,6 +28,10 @@ CREATE TABLE IF NOT EXISTS executions (
 
 -- Index for querying by status
 CREATE INDEX IF NOT EXISTS idx_executions_status ON executions(status);
+
+-- Index for scoped inspection queries (workflow + status, newest first)
+CREATE INDEX IF NOT EXISTS idx_executions_workflow_status
+  ON executions(workflow_name, status, created_at DESC);
 
 -- Unique key constraint: at most one RUNNING execution per key. Scoped to
 -- status='running' so completed/failed history neither blocks key reuse
@@ -53,6 +59,7 @@ CREATE TABLE IF NOT EXISTS activity_tasks (
   completed_at INTEGER,
   error TEXT,
   error_stack TEXT,
+  error_history TEXT,
   owner_id TEXT,
   lease_expires_at INTEGER,
   FOREIGN KEY (run_id) REFERENCES executions(run_id) ON DELETE CASCADE
@@ -80,7 +87,8 @@ CREATE TABLE IF NOT EXISTS dead_letters (
   error_stack TEXT,
   attempts INTEGER NOT NULL,
   failed_at INTEGER NOT NULL,
-  acknowledged INTEGER NOT NULL DEFAULT 0
+  acknowledged INTEGER NOT NULL DEFAULT 0,
+  non_retryable INTEGER NOT NULL DEFAULT 0
 );
 
 -- Index for unacknowledged dead letters
@@ -111,8 +119,12 @@ export function getSchemaStatements(): string[] {
  *   report user_version 0 and are treated as v1.
  * - v2: activity_tasks gains failures, owner_id, lease_expires_at; the
  *   executions unique index is rebuilt scoped to status='running'.
+ * - v3: dead_letters gains non_retryable (M1 failure classification).
+ * - v4: executions gains workflow_version (H7 upgrade-skew detection).
+ * - v5: activity_tasks gains error_history (M2 attempt/skip history).
+ * - v6: executions gains metadata; scoped-inspection index (M6).
  */
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 6;
 
 /**
  * A single schema migration. Statements run in order inside one
@@ -137,6 +149,31 @@ export const MIGRATIONS: Migration[] = [
       `ALTER TABLE activity_tasks ADD COLUMN lease_expires_at INTEGER;`,
       `DROP INDEX IF EXISTS idx_executions_unique_key;`,
       `CREATE UNIQUE INDEX IF NOT EXISTS idx_executions_unique_key_running ON executions(workflow_name, unique_key) WHERE unique_key IS NOT NULL AND status = 'running';`,
+    ],
+  },
+  {
+    toVersion: 3,
+    statements: [
+      `ALTER TABLE dead_letters ADD COLUMN non_retryable INTEGER NOT NULL DEFAULT 0;`,
+    ],
+  },
+  {
+    toVersion: 4,
+    statements: [
+      `ALTER TABLE executions ADD COLUMN workflow_version TEXT;`,
+    ],
+  },
+  {
+    toVersion: 5,
+    statements: [
+      `ALTER TABLE activity_tasks ADD COLUMN error_history TEXT;`,
+    ],
+  },
+  {
+    toVersion: 6,
+    statements: [
+      `ALTER TABLE executions ADD COLUMN metadata TEXT;`,
+      `CREATE INDEX IF NOT EXISTS idx_executions_workflow_status ON executions(workflow_name, status, created_at DESC);`,
     ],
   },
 ];

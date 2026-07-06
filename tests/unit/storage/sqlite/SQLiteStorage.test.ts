@@ -517,6 +517,7 @@ describe('SQLiteStorage', () => {
       attempts: 3,
       failedAt: 1000000,
       acknowledged: false,
+      nonRetryable: false,
       ...overrides,
     });
 

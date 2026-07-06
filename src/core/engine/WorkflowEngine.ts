@@ -25,6 +25,9 @@ import {
   ExecutionNotFoundError,
   ActivityTimeoutError,
   RunConditionFn,
+  isNonRetryableError,
+  TaskErrorHistoryEntry,
+  ExecutionQuery,
 } from '../types';
 import { generateId, mergeState, calculateBackoffDelay, silentLogger, createAbortController } from '../utils';
 import { conditions } from '../conditions';
@@ -39,6 +42,24 @@ const DEFAULT_INITIAL_INTERVAL = 1000;
 const DEFAULT_BACKOFF_COEFFICIENT = 2;
 const DEFAULT_PRIORITY = 0;
 const DEFAULT_LEASE_MS = 60000;
+// How long to park a task whose activity isn't registered (upgrade skew)
+// before re-checking. Long enough to avoid busy-spinning, short enough
+// that a hotfixed definition picks the task up promptly.
+const HELD_TASK_RECHECK_DELAY = 60000;
+// Recheck cadence for tasks skipped by runWhen when the condition gives
+// no retryInMs hint.
+const DEFAULT_SKIP_RESCHEDULE_DELAY = 30000;
+// Bound on per-task error history — oldest entries drop first. Keeps
+// long-retrying offline tasks from growing their row on every attempt.
+const MAX_ERROR_HISTORY = 20;
+
+/** Append to a task's bounded error history (newest last). */
+function appendErrorHistory(
+  history: TaskErrorHistoryEntry[] | undefined,
+  entry: TaskErrorHistoryEntry
+): TaskErrorHistoryEntry[] {
+  return [...(history ?? []), entry].slice(-MAX_ERROR_HISTORY);
+}
 
 /**
  * The WorkflowEngine orchestrates workflow execution.
@@ -194,13 +215,15 @@ export class WorkflowEngine {
         continue;
       }
 
-      // No record of the frontier activity at all — schedule it.
-      const activity = workflow.activities[execution.currentActivityIndex];
-      if (!activity || activity.name !== execution.currentActivityName) {
-        this.logger.warn('Cannot reconcile stranded execution: activity mismatch', {
+      // No record of the frontier activity at all — schedule it. Resolve
+      // by NAME: after an app upgrade the persisted index may point at a
+      // different step in the new definition (H7).
+      const activity = workflow.activities.find(a => a.name === execution.currentActivityName);
+      if (!activity) {
+        this.logger.warn('Cannot reconcile stranded execution: activity not in registered definition — holding', {
           runId: execution.runId,
-          expected: execution.currentActivityName,
-          found: activity?.name,
+          activityName: execution.currentActivityName,
+          workflowName: workflow.name,
         });
         continue;
       }
@@ -225,10 +248,16 @@ export class WorkflowEngine {
     }
     this.workflows.set(workflow.name, workflow);
 
-    // Also register all activities from this workflow. The engine
-    // erases per-activity input/output generics internally.
-    for (const activity of workflow.activities) {
-      this.activities.set(activity.name, activity as Activity);
+    // Rebuild the activity map from every registered workflow rather
+    // than accumulating: re-registering a changed definition must not
+    // leave its previous activities reachable, or an in-flight task
+    // could execute stale code after an app upgrade.
+    this.activities.clear();
+    for (const registered of this.workflows.values()) {
+      // The engine erases per-activity input/output generics internally.
+      for (const activity of registered.activities) {
+        this.activities.set(activity.name, activity as Activity);
+      }
     }
 
     this.logger.debug('Registered workflow', {
@@ -279,12 +308,14 @@ export class WorkflowEngine {
     const execution: WorkflowExecution = {
       runId,
       workflowName: workflow.name,
+      workflowVersion: workflow.version,
       uniqueKey: options.uniqueKey,
       currentActivityIndex: 0,
       currentActivityName: firstActivity.name,
       status: 'running',
       input: options.input as Record<string, unknown>,
       state: options.input as Record<string, unknown>,
+      metadata: options.metadata,
       createdAt: now,
       updatedAt: now,
     };
@@ -397,6 +428,13 @@ export class WorkflowEngine {
   }
 
   /**
+   * Scoped, paginated execution query (newest first). See ExecutionQuery.
+   */
+  async getExecutions(query: ExecutionQuery = {}): Promise<WorkflowExecution[]> {
+    return this.storage.getExecutions(query);
+  }
+
+  /**
    * Cancel a workflow execution.
    */
   async cancelExecution(runId: string): Promise<void> {
@@ -496,7 +534,7 @@ export class WorkflowEngine {
 
         // If no work was done, sleep briefly
         if (processed === 0) {
-          await this.scheduler.sleep(100);
+          await this.scheduler.sleep(options?.tickInterval ?? 100);
         }
       }
     } finally {
@@ -596,19 +634,31 @@ export class WorkflowEngine {
 
     const activity = this.activities.get(task.activityName);
     if (!activity) {
-      this.logger.error('Activity not found', { activityName: task.activityName });
-      await this.handleTaskPermanentFailure(claimed, new Error(`Activity '${task.activityName}' not registered`));
+      // Upgrade skew: the persisted task references an activity this
+      // build doesn't register (renamed/removed step). Hold — never
+      // dead-letter — so a later release that restores the name resumes
+      // the workflow instead of every in-flight execution being nuked.
+      await this.handleTaskHeld(claimed);
       return true;
     }
 
     // Check runWhen condition
     const runWhen: RunConditionFn = activity.options?.runWhen ?? conditions.always;
     const runtimeContext = this.environment.getRuntimeContext();
-    const conditionResult = runWhen({ ...runtimeContext, input: claimed.input });
+    const conditionResult = runWhen({
+      ...runtimeContext,
+      input: claimed.input,
+      now,
+      taskCreatedAt: claimed.createdAt,
+    });
 
     if (!conditionResult.ready) {
       // Skip task, schedule for later retry
-      await this.handleTaskSkipped(claimed, conditionResult.reason ?? 'Condition not met');
+      await this.handleTaskSkipped(
+        claimed,
+        conditionResult.reason ?? 'Condition not met',
+        conditionResult.retryInMs
+      );
       return true;
     }
 
@@ -772,6 +822,20 @@ export class WorkflowEngine {
     // task) must commit atomically — a crash between them strands the
     // workflow 'running' with no frontier task.
     await this.storage.transaction(async () => {
+      // Terminal states are sticky: if the execution left 'running'
+      // while this activity was in flight (cancelled from another
+      // engine/context), discard the late success — writing the task
+      // would resurrect rows cancelExecution deleted.
+      const execution = await this.storage.getExecution(task.runId);
+      if (!execution || execution.status !== 'running') {
+        this.logger.debug('Discarding late success for non-running execution', {
+          taskId: task.taskId,
+          runId: task.runId,
+          status: execution?.status ?? 'missing',
+        });
+        return;
+      }
+
       await this.storage.saveActivityTask(completedTask);
 
       // Call onSuccess callback
@@ -812,17 +876,67 @@ export class WorkflowEngine {
       return;
     }
 
+    // Sticky terminal states: never advance an execution that is no
+    // longer running (cancelled/failed/completed while in flight).
+    if (execution.status !== 'running') {
+      this.logger.debug('Not advancing non-running execution', {
+        runId: execution.runId,
+        status: execution.status,
+      });
+      return;
+    }
+
     const workflow = this.workflows.get(execution.workflowName);
     if (!workflow) {
       this.logger.error('Workflow not found', { workflowName: execution.workflowName });
       return;
     }
 
+    // Surface definition version skew (observability only — name-based
+    // matching below keeps mixed-version resumes safe).
+    if (
+      workflow.version !== undefined &&
+      execution.workflowVersion !== undefined &&
+      workflow.version !== execution.workflowVersion
+    ) {
+      this.emitEvent({
+        type: 'execution:version-skew',
+        timestamp: now,
+        runId: execution.runId,
+        workflowName: workflow.name,
+        persistedVersion: execution.workflowVersion,
+        registeredVersion: workflow.version,
+      });
+      this.logger.warn('Execution resumed under a different workflow definition version', {
+        runId: execution.runId,
+        persistedVersion: execution.workflowVersion,
+        registeredVersion: workflow.version,
+      });
+    }
+
     // Merge result into workflow state
     const newState = mergeState(execution.state, result);
 
+    // Locate the completed activity by NAME in the CURRENT definition.
+    // The persisted index belongs to the definition that scheduled the
+    // task; after an app upgrade that inserted/removed steps, index
+    // arithmetic would re-run or skip the wrong activity (H7).
+    const completedIndex = workflow.activities.findIndex(a => a.name === completedTask.activityName);
+    if (completedIndex === -1) {
+      // The completed step no longer exists in this build's definition,
+      // so its successor is unknowable. Leave the execution running with
+      // no frontier task — reconciliation replays this advance and
+      // succeeds once a definition containing the activity is registered.
+      this.logger.warn('Completed activity not in registered definition — holding advance', {
+        runId: execution.runId,
+        activityName: completedTask.activityName,
+        workflowName: workflow.name,
+      });
+      return;
+    }
+
     // Check if this was the last activity
-    const nextIndex = execution.currentActivityIndex + 1;
+    const nextIndex = completedIndex + 1;
     const isComplete = nextIndex >= workflow.activities.length;
 
     if (isComplete) {
@@ -891,6 +1005,20 @@ export class WorkflowEngine {
   private async handleTaskFailure(task: ActivityTask, activity: Activity, error: Error): Promise<void> {
     const now = this.clock.now();
 
+    // Terminal states are sticky: a failure landing after the execution
+    // left 'running' (typically the abort triggered by cancelExecution,
+    // or a late settlement from another engine) must not schedule a
+    // retry — that would resurrect task rows the cancel deleted.
+    const execution = await this.storage.getExecution(task.runId);
+    if (!execution || execution.status !== 'running') {
+      this.logger.debug('Discarding late failure for non-running execution', {
+        taskId: task.taskId,
+        runId: task.runId,
+        status: execution?.status ?? 'missing',
+      });
+      return;
+    }
+
     // Call onFailure callback
     if (activity.options?.onFailure) {
       try {
@@ -903,8 +1031,13 @@ export class WorkflowEngine {
     // Only real failures count toward exhaustion — attempts is the claim
     // count and includes claims lost to crashes.
     const failures = (task.failures ?? 0) + 1;
+    const errorHistory = appendErrorHistory(task.errorHistory, {
+      at: now,
+      kind: 'failure',
+      message: error.message,
+    });
 
-    if (failures < task.maxAttempts) {
+    if (failures < task.maxAttempts && !isNonRetryableError(error)) {
       // Schedule retry with backoff
       const retryOpts = activity.options?.retry ?? {};
       const delay = calculateBackoffDelay(
@@ -922,6 +1055,7 @@ export class WorkflowEngine {
         lastAttemptAt: now,
         error: error.message,
         errorStack: error.stack,
+        errorHistory,
         ownerId: undefined,
         leaseExpiresAt: undefined,
       };
@@ -935,7 +1069,7 @@ export class WorkflowEngine {
       });
     } else {
       // Permanent failure
-      await this.handleTaskPermanentFailure({ ...task, failures }, error);
+      await this.handleTaskPermanentFailure({ ...task, failures, errorHistory }, error);
     }
   }
 
@@ -945,6 +1079,19 @@ export class WorkflowEngine {
   private async handleTaskPermanentFailure(task: ActivityTask, error: Error): Promise<void> {
     const now = this.clock.now();
     const execution = await this.storage.getExecution(task.runId);
+
+    // Terminal states are sticky: never flip a cancelled/completed/failed
+    // execution to failed or dead-letter its tasks. (A missing execution
+    // still dead-letters below — the DLQ entry is the only trace left.)
+    if (execution && execution.status !== 'running') {
+      this.logger.debug('Discarding late permanent failure for non-running execution', {
+        taskId: task.taskId,
+        runId: task.runId,
+        status: execution.status,
+      });
+      return;
+    }
+
     const workflow = execution ? this.workflows.get(execution.workflowName) : null;
     const activity = this.activities.get(task.activityName);
 
@@ -986,6 +1133,7 @@ export class WorkflowEngine {
         attempts: task.attempts,
         failedAt: now,
         acknowledged: false,
+        nonRetryable: isNonRetryableError(error),
       };
       await this.storage.saveDeadLetter(deadLetter);
 
@@ -1050,19 +1198,81 @@ export class WorkflowEngine {
   }
 
   /**
+   * Hold a task whose activity isn't registered in this build (upgrade
+   * skew). The claim is released without burning an attempt and the task
+   * is parked pending with a recheck delay — it self-heals as soon as a
+   * definition containing the activity is registered again.
+   */
+  private async handleTaskHeld(task: ActivityTask): Promise<void> {
+    const now = this.clock.now();
+
+    // Sticky terminal states: don't resurrect task rows for an
+    // execution that left 'running' while this claim was in flight.
+    const execution = await this.storage.getExecution(task.runId);
+    if (!execution || execution.status !== 'running') {
+      this.logger.debug('Not holding task for non-running execution', {
+        taskId: task.taskId,
+        runId: task.runId,
+        status: execution?.status ?? 'missing',
+      });
+      return;
+    }
+
+    const heldTask: ActivityTask = {
+      ...task,
+      status: 'pending',
+      scheduledFor: now + HELD_TASK_RECHECK_DELAY,
+      lastAttemptAt: now,
+      ownerId: undefined,
+      leaseExpiresAt: undefined,
+      // Being held is not a failure and must not burn the claim either
+      attempts: Math.max(0, task.attempts - 1),
+    };
+    await this.storage.saveActivityTask(heldTask);
+
+    this.emitEvent({
+      type: 'activity:held',
+      timestamp: now,
+      runId: task.runId,
+      taskId: task.taskId,
+      activityName: task.activityName,
+    });
+
+    this.logger.warn('Activity not registered in this build — holding task', {
+      taskId: task.taskId,
+      activityName: task.activityName,
+      recheckAt: heldTask.scheduledFor,
+    });
+  }
+
+  /**
    * Handle task skipped due to runWhen condition.
    */
-  private async handleTaskSkipped(task: ActivityTask, reason: string): Promise<void> {
+  private async handleTaskSkipped(task: ActivityTask, reason: string, retryInMs?: number): Promise<void> {
     const now = this.clock.now();
+
+    // Sticky terminal states: don't resurrect task rows for an
+    // execution that left 'running' while this claim was in flight.
+    const execution = await this.storage.getExecution(task.runId);
+    if (!execution || execution.status !== 'running') {
+      this.logger.debug('Not rescheduling skipped task for non-running execution', {
+        taskId: task.taskId,
+        runId: task.runId,
+        status: execution?.status ?? 'missing',
+      });
+      return;
+    }
+
     const activity = this.activities.get(task.activityName);
 
-    // Reschedule for later (default 30 seconds)
-    const delay = 30000;
+    // Reschedule at the condition's retryInMs hint, defaulting to 30s
+    const delay = retryInMs ?? DEFAULT_SKIP_RESCHEDULE_DELAY;
     const skippedTask: ActivityTask = {
       ...task,
       status: 'pending',
       scheduledFor: now + delay,
       lastAttemptAt: now,
+      errorHistory: appendErrorHistory(task.errorHistory, { at: now, kind: 'skip', message: reason }),
       ownerId: undefined,
       leaseExpiresAt: undefined,
     };
@@ -1113,6 +1323,105 @@ export class WorkflowEngine {
    */
   async acknowledgeDeadLetter(id: string): Promise<void> {
     await this.storage.acknowledgeDeadLetter(id);
+  }
+
+  /**
+   * Redrive a dead-lettered task: reset it to pending with a fresh retry
+   * budget, re-open its execution at the same activity cursor, and remove
+   * the dead letter record. This is the "Force Retry" recovery path.
+   *
+   * Throws if the dead letter, its execution, or its task no longer
+   * exists, or if the execution's uniqueKey has since been claimed by
+   * another running execution. On throw, nothing is mutated.
+   *
+   * @returns the re-opened execution
+   */
+  async retryFromDeadLetter(deadLetterId: string): Promise<WorkflowExecution> {
+    const now = this.clock.now();
+
+    const deadLetters = await this.storage.getDeadLetters();
+    const deadLetter = deadLetters.find(dl => dl.id === deadLetterId);
+    if (!deadLetter) {
+      throw new Error(`Dead letter not found: ${deadLetterId}`);
+    }
+
+    const execution = await this.storage.getExecution(deadLetter.runId);
+    if (!execution) {
+      throw new Error(
+        `Cannot redrive dead letter ${deadLetterId}: execution ${deadLetter.runId} no longer exists`
+      );
+    }
+
+    const task = await this.storage.getActivityTask(deadLetter.taskId);
+    if (!task) {
+      throw new Error(
+        `Cannot redrive dead letter ${deadLetterId}: task ${deadLetter.taskId} no longer exists`
+      );
+    }
+
+    const revivedExecution: WorkflowExecution = {
+      ...execution,
+      status: 'running',
+      error: undefined,
+      failedActivityName: undefined,
+      completedAt: undefined,
+      updatedAt: now,
+    };
+
+    // Fresh retry budget: failures drives exhaustion; attempts stays as
+    // the historical claim count.
+    const revivedTask: ActivityTask = {
+      ...task,
+      status: 'pending',
+      failures: 0,
+      scheduledFor: undefined,
+      startedAt: undefined,
+      completedAt: undefined,
+      error: undefined,
+      errorStack: undefined,
+      ownerId: undefined,
+      leaseExpiresAt: undefined,
+    };
+
+    // Key reservation, task reset, execution re-open, and dead-letter
+    // removal must commit atomically — a partial write recreates exactly
+    // the stranded shapes the C2 fix eliminated.
+    await this.storage.transaction(async () => {
+      if (execution.uniqueKey) {
+        const reserved = await this.storage.setUniqueKey(
+          execution.workflowName,
+          execution.uniqueKey,
+          execution.runId
+        );
+        if (!reserved) {
+          throw new Error(
+            `Cannot redrive dead letter ${deadLetterId}: uniqueKey '${execution.uniqueKey}' is held by another running execution`
+          );
+        }
+      }
+
+      await this.storage.saveActivityTask(revivedTask);
+      await this.storage.saveExecution(revivedExecution);
+      await this.storage.deleteDeadLetter(deadLetterId);
+    });
+
+    this.emitEvent({
+      type: 'deadletter:redriven',
+      timestamp: now,
+      runId: deadLetter.runId,
+      taskId: deadLetter.taskId,
+      activityName: deadLetter.activityName,
+      workflowName: deadLetter.workflowName,
+    });
+
+    this.logger.info('Redrove dead letter', {
+      deadLetterId,
+      runId: deadLetter.runId,
+      taskId: deadLetter.taskId,
+      activityName: deadLetter.activityName,
+    });
+
+    return revivedExecution;
   }
 
   /**

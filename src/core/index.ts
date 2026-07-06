@@ -12,6 +12,7 @@ export {
   // Data models
   WorkflowExecution,
   ActivityTask,
+  TaskErrorHistoryEntry,
   DeadLetterRecord,
 
   // Activity types
@@ -31,6 +32,7 @@ export {
 
   // Engine types
   StartWorkflowOptions,
+  ExecutionQuery,
   TickOptions,
   Logger,
   EngineEventType,
@@ -50,6 +52,8 @@ export {
   WorkflowNotFoundError,
   ExecutionNotFoundError,
   ActivityTimeoutError,
+  NonRetryableError,
+  isNonRetryableError,
 } from './types';
 
 // Definitions

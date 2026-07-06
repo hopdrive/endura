@@ -24,10 +24,16 @@ export interface WorkflowExecution {
   runId: string;
   /** References workflow definition name */
   workflowName: string;
+  /** Workflow definition version at start time (see Workflow.version) */
+  workflowVersion?: string;
   /** Optional deduplication key */
   uniqueKey?: string;
 
-  /** Position in activity sequence (0-based) */
+  /**
+   * Position in activity sequence (0-based). Advisory: the engine
+   * resolves activities by currentActivityName and repairs this index
+   * against the registered definition when they disagree (upgrade skew).
+   */
   currentActivityIndex: number;
   /** Name of current/next activity */
   currentActivityName: string;
@@ -38,6 +44,12 @@ export interface WorkflowExecution {
   input: Record<string, unknown>;
   /** Accumulated state (input + activity returns merged) */
   state: Record<string, unknown>;
+  /**
+   * Opaque caller-provided grouping/scoping data set at start (e.g.
+   * { moveId } so a recovery screen can group executions per move).
+   * Never read by the engine.
+   */
+  metadata?: Record<string, unknown>;
 
   /** Unix timestamp ms - when created */
   createdAt: number;
@@ -55,6 +67,17 @@ export interface WorkflowExecution {
 // ============================================================================
 // Activity Task
 // ============================================================================
+
+/**
+ * One recorded failure or skip in a task's history.
+ */
+export interface TaskErrorHistoryEntry {
+  /** When it happened (engine Clock, unix ms) */
+  at: number;
+  /** failure = exception/timeout; skip = runWhen condition not ready */
+  kind: 'failure' | 'skip';
+  message: string;
+}
 
 /**
  * An ActivityTask is a persisted record representing a scheduled activity execution.
@@ -106,6 +129,12 @@ export interface ActivityTask {
   error?: string;
   /** Last error stack trace */
   errorStack?: string;
+  /**
+   * Bounded log of failures and skips across attempts (newest last).
+   * The single error field above only ever holds the LAST error; this
+   * preserves the full picture for failure reporting and jobs UIs.
+   */
+  errorHistory?: TaskErrorHistoryEntry[];
 }
 
 // ============================================================================
@@ -135,6 +164,12 @@ export interface DeadLetterRecord {
   failedAt: number;
   /** Has this been reviewed/handled? */
   acknowledged: boolean;
+  /**
+   * True when the failure was a NonRetryableError (permanent refusal)
+   * rather than an exhausted retry budget. Recovery UIs can use this to
+   * suppress the Force Retry affordance.
+   */
+  nonRetryable?: boolean;
 }
 
 // ============================================================================
@@ -187,8 +222,19 @@ export interface RunConditionResult {
 
 /**
  * A function that evaluates whether an activity should run.
+ * The engine injects `now` (its injected Clock) and `taskCreatedAt`
+ * alongside the runtime context so time-based conditions like
+ * afterDelay stay deterministic and testable.
  */
-export type RunConditionFn = (ctx: RuntimeContext & { input: Record<string, unknown> }) => RunConditionResult;
+export type RunConditionFn = (
+  ctx: RuntimeContext & {
+    input: Record<string, unknown>;
+    /** Current time per the engine's Clock */
+    now?: number;
+    /** When the evaluated task was created */
+    taskCreatedAt?: number;
+  }
+) => RunConditionResult;
 
 /**
  * Retry policy configuration.
@@ -267,6 +313,14 @@ export interface WorkflowCallbacks {
 export interface Workflow<TInput = Record<string, unknown>> extends WorkflowCallbacks {
   name: string;
   activities: AnyActivity[];
+  /**
+   * Optional definition version, stamped onto each execution at start.
+   * When a resumed execution's stored version differs from the
+   * registered definition's, the engine emits execution:version-skew —
+   * observability only, never a gate: name-based activity matching
+   * keeps mixed-version resumes safe.
+   */
+  version?: string;
   /** @internal Type brand for input type inference */
   readonly _inputType?: TInput;
 }
@@ -284,6 +338,8 @@ export interface StartWorkflowOptions<TInput = Record<string, unknown>> {
   uniqueKey?: string;
   /** How to handle uniqueness conflicts */
   onConflict?: 'throw' | 'ignore';
+  /** Opaque grouping/scoping data stored on the execution (see WorkflowExecution.metadata) */
+  metadata?: Record<string, unknown>;
 }
 
 /**
@@ -292,6 +348,8 @@ export interface StartWorkflowOptions<TInput = Record<string, unknown>> {
 export interface TickOptions {
   /** Max time to run in ms (for background mode) */
   lifespan?: number;
+  /** Idle sleep between ticks when no work was processed (default 100ms) */
+  tickInterval?: number;
 }
 
 /**
@@ -316,7 +374,10 @@ export type EngineEventType =
   | 'activity:completed'
   | 'activity:failed'
   | 'activity:skipped'
-  | 'deadletter:added';
+  | 'activity:held'
+  | 'deadletter:added'
+  | 'deadletter:redriven'
+  | 'execution:version-skew';
 
 export interface EngineEvent {
   type: EngineEventType;
@@ -421,6 +482,21 @@ export interface StorageChange {
 }
 
 /**
+ * Scoped, paginated execution query. Results are ordered newest first
+ * (createdAt DESC).
+ */
+export interface ExecutionQuery {
+  /** Only these statuses (single value or list) */
+  status?: WorkflowExecutionStatus | WorkflowExecutionStatus[];
+  /** Only this workflow */
+  workflowName?: string;
+  /** Page size (default 100) */
+  limit?: number;
+  /** Page start (default 0) */
+  offset?: number;
+}
+
+/**
  * Storage adapter interface.
  */
 export interface Storage {
@@ -428,6 +504,7 @@ export interface Storage {
   saveExecution(execution: WorkflowExecution): Promise<void>;
   getExecution(runId: string): Promise<WorkflowExecution | null>;
   getExecutionsByStatus(status: WorkflowExecutionStatus): Promise<WorkflowExecution[]>;
+  getExecutions(query: ExecutionQuery): Promise<WorkflowExecution[]>;
   deleteExecution(runId: string): Promise<void>;
 
   // Uniqueness
@@ -526,4 +603,35 @@ export class ActivityTimeoutError extends Error {
     super(`Activity '${taskId}' timed out after ${timeout}ms`);
     this.name = 'ActivityTimeoutError';
   }
+}
+
+/**
+ * Throw from an activity to fail permanently without burning the
+ * remaining retry budget: the task dead-letters immediately and the
+ * dead letter is flagged nonRetryable. Use for permanent refusals
+ * (validation rejections, authorization failures) where retrying can
+ * never succeed.
+ */
+export class NonRetryableError extends Error {
+  readonly nonRetryable = true;
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'NonRetryableError';
+  }
+}
+
+/**
+ * True when an error should skip the retry budget. Matches
+ * NonRetryableError instances and any error carrying `nonRetryable:
+ * true` — the duck-typed check keeps classification working across
+ * bundle copies and for consumer-defined error hierarchies.
+ */
+export function isNonRetryableError(error: unknown): boolean {
+  if (error instanceof NonRetryableError) return true;
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    (error as { nonRetryable?: unknown }).nonRetryable === true
+  );
 }

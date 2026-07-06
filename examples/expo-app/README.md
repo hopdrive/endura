@@ -12,8 +12,12 @@ leases), or C6 (Hermes ID minting); this app can.
 | --- | --- | --- |
 | START 3-STEP → completes | C1, C6, end-to-end engine on device | `COMPLETED s1:1 s2:1 s3:1` |
 | Kill app mid-step → relaunch | C2, C3, C5 (atomic advance, lease recovery, no burned attempt) | run resumes and completes; steps finished before the kill stay at count 1 |
-| START FAILING | retry + DLQ path | `FAILED`, `DLQ:1` after 2 attempts |
+| START FAILING | retry + DLQ path | `FAILED`, DLQ count +1 after 2 attempts |
 | START KEYED (starts twice with one key) | C7 uniqueKey dedup | `KEYED:SAME-RUN`, single execution |
+| FORCE RETRY on a dead letter | H5 redrive (Force Retry parity) | `RETRY:REDRIVEN`, run flips to `COMPLETED redriven:1`, DLQ count −1 |
+| START NONRETRY | M1 NonRetryableError classification | `FAILED nr:1` (one attempt despite budget 5), `NR:` count +1; FORCE RETRY then says `RETRY:NO-TARGET` |
+| CANCEL 3-STEP mid-step | H3 sticky terminal states | `CANCELLED` with step counts frozen; stays cancelled through recovery scans and app relaunch |
+| Reopen a Phase 1 database | C8 migration runner (v2 → current) | all legacy runs/history/DLQ render intact; legacy dead letters read as retryable (`NR:0`) |
 
 Every step execution appends a row to a `step_log` side table in the same
 database, so duplicate executions are visible as `sN:2+` counts in the UI.
@@ -44,12 +48,31 @@ lease is live; the periodic half-lease re-scan picks it up after expiry).
 
 ## Last verified
 
-2026-07-05 — iPhone 16 simulator, iOS 18.3, Expo Go SDK 57, RN 0.86
-(Hermes), expo-sqlite 16.x, driven by Maestro. All four scenarios passed:
-four 3-step runs completed with every step count exactly 1 (one run
-killed mid-step2 via `simctl terminate` and resumed after relaunch),
-failing workflow dead-lettered after 2 attempts, keyed double-start
-returned the same run.
+**Phase 2 (PR #10 build), 2026-07-05** — iPhone 16 simulator, iOS 18.3,
+Expo Go SDK 57, RN 0.86 (Hermes), expo-sqlite 16.x, driven by Maestro.
+All scenarios passed, including the Phase 1 set as regression:
+
+- Opening the Phase 1 database migrated schema v2 → v6 in place: all
+  prior runs, step counts, and the legacy dead letter rendered intact.
+- FORCE RETRY redrove the dead letter that Phase 1 code had written:
+  `RETRY:REDRIVEN`, the failed run completed with `redriven:1`, DLQ
+  dropped to 0.
+- NONRETRY dead-lettered after exactly one attempt (`nr:1`, `NR:1`);
+  FORCE RETRY refused it (`RETRY:NO-TARGET`).
+- CANCEL mid-step-1 stuck: `CANCELLED s1:0 s2:0 s3:0`, unchanged
+  through lease expiry, periodic recovery scans, and a full app
+  kill/relaunch.
+- Kill mid-step-2 → relaunch: the run resumed and completed with every
+  step count exactly 1; a concurrent duplicate run (double-tap
+  artifact) completed independently without cross-contamination.
+- FAILING dead-lettered after 2 attempts (retryable, `NR` unchanged);
+  KEYED double-start returned `KEYED:SAME-RUN`.
+
+**Phase 1, 2026-07-05** — same rig, Phase 1 build: four 3-step runs
+completed with every step count exactly 1 (one killed mid-step2 via
+`simctl terminate` and resumed after relaunch), failing workflow
+dead-lettered after 2 attempts, keyed double-start returned the same
+run.
 
 Not covered here: standalone (non-Expo Go) builds, physical devices, and
 the background wake path (expo-background-task) — those remain for the
