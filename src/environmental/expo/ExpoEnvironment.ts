@@ -200,4 +200,17 @@ export class ExpoEnvironment implements Environment {
   setLowPowerMode(enabled: boolean): void {
     this.cachedLowPowerMode = enabled;
   }
+
+  /**
+   * Update network state manually — the push counterpart to the polled
+   * getNetworkState provider. Call this from a NetInfo listener so
+   * runWhen gates see a connectivity change the moment it happens
+   * instead of up to a poll interval later (during which offline
+   * activities would attempt guaranteed-fail requests and burn retry
+   * budget). When both are used, a later poll of getNetworkState
+   * overwrites the pushed value.
+   */
+  setNetworkState(connected: boolean): void {
+    this.cachedIsConnected = connected;
+  }
 }

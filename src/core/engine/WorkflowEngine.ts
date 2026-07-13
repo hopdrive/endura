@@ -98,6 +98,10 @@ export class WorkflowEngine {
   private stateSizeWarnBytes: number;
   private random: () => number;
 
+  // FIFO chain serializing this engine's storage-transactional segments
+  // (see runExclusive).
+  private opChain: Promise<unknown> = Promise.resolve();
+
   // Track active AbortControllers by runId for cancellation propagation
   private activeAbortControllers: Map<string, { abort: (reason?: unknown) => void }> = new Map();
 
@@ -207,7 +211,7 @@ export class WorkflowEngine {
           runId: execution.runId,
           activityName: currentTask.activityName,
         });
-        await this.storage.transaction(async () => {
+        await this.exclusiveTransaction(async () => {
           await this.advanceWorkflow(currentTask, currentTask.result);
         });
         continue;
@@ -248,6 +252,35 @@ export class WorkflowEngine {
       });
       await this.scheduleActivityTask(execution, activity, execution.state);
     }
+  }
+
+  /**
+   * Run a storage-transactional segment exclusively.
+   *
+   * SQLite is one connection per client, and any statement issued while
+   * a transaction is open on that connection PARTICIPATES in it — the
+   * drivers must depth-join nested transaction() calls, so a concurrent
+   * engine operation interleaving on the event loop would silently join
+   * a stranger's transaction: its writes vanish with the stranger's
+   * rollback, or a loser's failure rolls back the winner's committed-
+   * looking rows (P4-003 ghost executions). Serializing the engine's
+   * transactional segments makes the depth-join safe: while a segment
+   * runs, no other segment can start.
+   *
+   * User activity code never executes under this lock, so activities may
+   * freely call engine.start() etc. Activity option callbacks
+   * (onSuccess/onFailed) DO run inside locked segments — they must not
+   * call engine write APIs or they will deadlock.
+   */
+  private runExclusive<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.opChain.then(() => fn());
+    this.opChain = run.catch(() => undefined);
+    return run;
+  }
+
+  /** storage.transaction under the operation lock — see runExclusive. */
+  private exclusiveTransaction<T>(fn: () => Promise<T>): Promise<T> {
+    return this.runExclusive(() => this.storage.transaction(fn));
   }
 
   // ============================================================================
@@ -342,7 +375,7 @@ export class WorkflowEngine {
     // arbiter for races the read cannot see.
     let existingExecution: WorkflowExecution | null = null;
     try {
-      await this.storage.transaction(async () => {
+      await this.exclusiveTransaction(async () => {
         if (options.uniqueKey) {
           const canUse = await this.storage.setUniqueKey(workflow.name, options.uniqueKey, runId);
           if (!canUse) {
@@ -364,7 +397,8 @@ export class WorkflowEngine {
       });
     } catch (err) {
       // Translate a database-level unique violation (a racer that the
-      // pre-check couldn't see) into the same error as the checked path.
+      // pre-check couldn't see) into the same error as the checked path —
+      // honoring onConflict just like the checked path does (P4-003).
       if (
         options.uniqueKey &&
         err instanceof Error &&
@@ -372,6 +406,12 @@ export class WorkflowEngine {
         !(err instanceof UniqueConstraintError)
       ) {
         const existingRunId = await this.storage.getUniqueKey(workflow.name, options.uniqueKey);
+        if (existingRunId && options.onConflict === 'ignore') {
+          const winner = await this.storage.getExecution(existingRunId);
+          if (winner) {
+            return winner;
+          }
+        }
         throw new UniqueConstraintError(workflow.name, options.uniqueKey, existingRunId ?? 'unknown');
       }
       throw err;
@@ -490,7 +530,7 @@ export class WorkflowEngine {
       updatedAt: now,
       completedAt: now,
     };
-    await this.storage.transaction(async () => {
+    await this.exclusiveTransaction(async () => {
       await this.storage.saveExecution(updatedExecution);
       await this.storage.deleteActivityTasksForExecution(runId);
       if (execution.uniqueKey) {
@@ -648,11 +688,14 @@ export class WorkflowEngine {
   private async processTask(task: ActivityTask): Promise<boolean> {
     const now = this.clock.now();
 
-    // Try to claim the task
-    const claimed = await this.storage.claimActivityTask(task.taskId, now, {
-      ownerId: this.ownerId,
-      leaseDurationMs: this.leaseDurationMs,
-    });
+    // Try to claim the task (the claim opens its own transaction — take
+    // the operation lock so it cannot join another segment's open one)
+    const claimed = await this.runExclusive(() =>
+      this.storage.claimActivityTask(task.taskId, now, {
+        ownerId: this.ownerId,
+        leaseDurationMs: this.leaseDurationMs,
+      })
+    );
     if (!claimed) {
       return false; // Already claimed or no longer pending
     }
@@ -762,19 +805,26 @@ export class WorkflowEngine {
       },
     };
 
-    try {
-      // Race the activity against the abort signal. Awaiting the handler
-      // directly would let one hung handler (that ignores ctx.signal)
-      // wedge the serial engine forever. Once the abort wins, any late
-      // settlement of the handler is dropped — the failure already
-      // recorded must not be overwritten (stale-success guard).
-      const executePromise = Promise.resolve(activity.execute(context));
-      executePromise.catch(() => {
-        // Late rejection from a timed-out/abandoned handler: already
-        // handled (or superseded) via the race — never let it surface
-        // as an unhandled rejection.
-      });
+    // Race the activity against the abort signal. Awaiting the handler
+    // directly would let one hung handler (that ignores ctx.signal)
+    // wedge the serial engine forever. Once the abort wins, any late
+    // settlement of the handler is dropped — the failure already
+    // recorded must not be overwritten (stale-success guard).
+    // Async wrapper so a synchronous throw from execute() becomes a
+    // rejection handled by the same failure path as async errors.
+    const executePromise = (async () => activity.execute(context))();
+    let handlerSettled = false;
+    const markSettled = () => {
+      handlerSettled = true;
+    };
+    executePromise.then(markSettled, markSettled);
+    executePromise.catch(() => {
+      // Late rejection from a timed-out/abandoned handler: already
+      // handled (or superseded) via the race — never let it surface
+      // as an unhandled rejection.
+    });
 
+    try {
       let result: unknown;
       if (task.timeout > 0) {
         const abortPromise = new Promise<never>((_, reject) => {
@@ -812,6 +862,31 @@ export class WorkflowEngine {
 
       const error = err instanceof Error ? err : new Error(String(err));
 
+      if (!handlerSettled) {
+        // The abort won the race and the handler is still running. Its
+        // eventual settlement is dropped by design, but the drop must be
+        // visible in logs — silence here hides hung handlers in production.
+        executePromise.then(
+          () => {
+            this.logger.info('Discarding late success from timed-out or aborted attempt', {
+              taskId: task.taskId,
+              activityName: task.activityName,
+              runId: task.runId,
+              attempt: task.attempts,
+            });
+          },
+          lateErr => {
+            this.logger.info('Discarding late failure from timed-out or aborted attempt', {
+              taskId: task.taskId,
+              activityName: task.activityName,
+              runId: task.runId,
+              attempt: task.attempts,
+              error: String(lateErr),
+            });
+          }
+        );
+      }
+
       // Handle failure
       await this.handleTaskFailure(task, activity, error);
     } finally {
@@ -846,7 +921,7 @@ export class WorkflowEngine {
     // The completed-task write and the advance (execution update + next
     // task) must commit atomically — a crash between them strands the
     // workflow 'running' with no frontier task.
-    await this.storage.transaction(async () => {
+    await this.exclusiveTransaction(async () => {
       // Terminal states are sticky: if the execution left 'running'
       // while this activity was in flight (cancelled from another
       // engine/context), discard the late success — writing the task
@@ -1171,7 +1246,7 @@ export class WorkflowEngine {
     // Failed task, dead letter, and failed execution must commit
     // atomically — a partial write leaves the workflow 'running' with a
     // dead frontier task, or a DLQ entry with a live execution.
-    await this.storage.transaction(async () => {
+    await this.exclusiveTransaction(async () => {
       await this.storage.saveActivityTask(failedTask);
 
       // Call onFailed callback
@@ -1449,7 +1524,7 @@ export class WorkflowEngine {
     // Key reservation, task reset, execution re-open, and dead-letter
     // removal must commit atomically — a partial write recreates exactly
     // the stranded shapes the C2 fix eliminated.
-    await this.storage.transaction(async () => {
+    await this.exclusiveTransaction(async () => {
       if (execution.uniqueKey) {
         const reserved = await this.storage.setUniqueKey(
           execution.workflowName,
