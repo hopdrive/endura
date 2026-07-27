@@ -35,7 +35,11 @@ export interface HarnessPlatform<TClient extends HarnessClient> {
    * the platform must wire into the engine's Environment (e.g.
    * ExpoEnvironmentOptions.getNetworkState).
    */
-  createClient(dbName: string, online: () => boolean): Promise<TClient>;
+  createClient(
+    dbName: string,
+    online: () => boolean,
+    options?: { worker?: unknown }
+  ): Promise<TClient>;
   /** Delete the named database (scenario reset). */
   deleteDatabase(dbName: string): Promise<void>;
   now(): number;

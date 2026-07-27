@@ -17,21 +17,19 @@
  */
 
 import * as Network from 'expo-network';
-import { defineActivity, defineWorkflow, Workflow } from 'endura';
+import { Worker } from '@ammarahmed/react-native-workers';
 import { expoPlatform, ParityClient } from './expoPlatform';
+import {
+  DEFAULT_ENDPOINT,
+  RegisteredWorkflow,
+  demoWorkflows,
+  setOnDutyState,
+} from '../workflows/demoWorkflows';
+
+export { DEFAULT_ENDPOINT } from '../workflows/demoWorkflows';
+export type { RegisteredWorkflow } from '../workflows/demoWorkflows';
 
 const DB_NAME = 'endura-demo.db';
-export const DEFAULT_ENDPOINT = 'https://postman-echo.com/post';
-/** Genuinely returns HTTP 500 about half the time. */
-const FLAKY_ENDPOINT = 'https://httpbin.org/status/500,200';
-/** Always returns HTTP 500 — the road to the dead-letter queue. */
-const DOOMED_ENDPOINT = 'https://httpbin.org/status/500';
-
-/** A registered workflow plus the copy the Setup tab shows for it. */
-export interface RegisteredWorkflow {
-  workflow: Workflow;
-  description: string;
-}
 
 export class DemoEngineSession {
   endpoint = DEFAULT_ENDPOINT;
@@ -40,6 +38,7 @@ export class DemoEngineSession {
   registered: RegisteredWorkflow[] = [];
 
   private client: ParityClient | null = null;
+  private worker: Worker | null = null;
   private networkSub: { remove(): void } | null = null;
   private radioOnline = true;
   private onDuty = true;
@@ -61,6 +60,9 @@ export class DemoEngineSession {
   /** App state the duty-gated workflows check through runWhen. */
   setOnDuty(onDuty: boolean): void {
     this.onDuty = onDuty;
+    // runWhen gates read module state in the shared workflows module
+    // (evaluated engine-side, so this main-bundle copy is the live one).
+    setOnDutyState(onDuty);
   }
 
   /** The live client, for inspection. Null when closed. */
@@ -73,208 +75,6 @@ export class DemoEngineSession {
     this.endpoint = /^https?:\/\//.test(trimmed) ? trimmed : DEFAULT_ENDPOINT;
   }
 
-  // --- Workflow definitions -------------------------------------------------
-
-  /** Real HTTP delivery with idempotency; shared by most activities. */
-  private async deliver(
-    endpoint: string,
-    payload: Record<string, unknown>,
-    jobId: string,
-    attempt: number,
-    signal: AbortSignal
-  ): Promise<{ deliveredAt: number; httpStatus: number }> {
-    const response = await fetch(endpoint, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': jobId },
-      body: JSON.stringify({ source: 'endura-demo', ...payload, attempt, sentAt: new Date().toISOString() }),
-      signal,
-    });
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status} from ${endpoint}`);
-    }
-    return { deliveredAt: Date.now(), httpStatus: response.status };
-  }
-
-  /** Connectivity gate: hold (attempts frozen) while the radio is off. */
-  private whenOnline = (rc: { isConnected: boolean }) =>
-    rc.isConnected ? { ready: true } : { ready: false, reason: 'offline — waiting for connectivity', retryInMs: 500 };
-
-  /** Duty gate: app state first, then connectivity. */
-  private whenOnDuty = (rc: { isConnected: boolean }) => {
-    if (!this.onDuty) return { ready: false, reason: 'driver is off duty', retryInMs: 1000 };
-    return this.whenOnline(rc);
-  };
-
-  private buildRegistry(): RegisteredWorkflow[] {
-    const statusUpdate = defineWorkflow({
-      name: 'demo.statusUpdate',
-      activities: [
-        defineActivity({
-          name: 'demo.status.send',
-          priority: 50,
-          startToCloseTimeout: 20000,
-          retry: { maximumAttempts: 8, initialInterval: 2000 },
-          runWhen: this.whenOnline,
-          execute: async a => {
-            const input = a.input as { jobId: string; endpoint: string; note?: string };
-            return this.deliver(input.endpoint, { jobId: input.jobId, kind: 'status', note: input.note }, input.jobId, a.attempt, a.signal);
-          },
-        }),
-      ],
-    });
-
-    const flakyDelivery = defineWorkflow({
-      name: 'demo.flakyDelivery',
-      activities: [
-        defineActivity({
-          name: 'demo.flaky.send',
-          priority: 40,
-          startToCloseTimeout: 20000,
-          retry: { maximumAttempts: 8, initialInterval: 2000 },
-          runWhen: this.whenOnline,
-          execute: async a => {
-            const input = a.input as { jobId: string };
-            return this.deliver(FLAKY_ENDPOINT, { jobId: input.jobId, kind: 'flaky' }, input.jobId, a.attempt, a.signal);
-          },
-        }),
-      ],
-    });
-
-    const photoPipeline = defineWorkflow({
-      name: 'demo.photoPipeline',
-      activities: [
-        defineActivity({
-          name: 'demo.photo.prepare',
-          retry: { maximumAttempts: 3, initialInterval: 1000 },
-          execute: async a => {
-            const input = a.input as { jobId: string };
-            // Local work: pretend to resize/compress before upload.
-            await new Promise(resolve => setTimeout(resolve, 400));
-            return { prepared: true, width: 1280, height: 960, bytes: 182304, checksum: `sha1-${input.jobId}` };
-          },
-        }),
-        defineActivity({
-          name: 'demo.photo.upload',
-          priority: 5,
-          startToCloseTimeout: 25000,
-          retry: { maximumAttempts: 8, initialInterval: 2000 },
-          runWhen: this.whenOnline,
-          execute: async a => {
-            const input = a.input as { jobId: string; endpoint: string; checksum?: string };
-            const result = await this.deliver(
-              input.endpoint,
-              { jobId: input.jobId, kind: 'photo-upload', checksum: input.checksum },
-              input.jobId,
-              a.attempt,
-              a.signal
-            );
-            return { ...result, remoteId: `photo-${input.jobId}` };
-          },
-        }),
-        defineActivity({
-          name: 'demo.photo.finalize',
-          retry: { maximumAttempts: 8, initialInterval: 2000 },
-          runWhen: this.whenOnline,
-          execute: async a => {
-            const input = a.input as { jobId: string; endpoint: string; remoteId?: string };
-            await this.deliver(
-              input.endpoint,
-              { jobId: input.jobId, kind: 'photo-finalize', remoteId: input.remoteId },
-              `${input.jobId}-finalize`,
-              a.attempt,
-              a.signal
-            );
-            return { finalized: true };
-          },
-        }),
-      ],
-    });
-
-    const dutyReport = defineWorkflow({
-      name: 'demo.dutyReport',
-      activities: [
-        defineActivity({
-          name: 'demo.duty.send',
-          priority: 45,
-          startToCloseTimeout: 20000,
-          retry: { maximumAttempts: 8, initialInterval: 2000 },
-          runWhen: this.whenOnDuty,
-          execute: async a => {
-            const input = a.input as { jobId: string; endpoint: string };
-            return this.deliver(input.endpoint, { jobId: input.jobId, kind: 'duty-report' }, input.jobId, a.attempt, a.signal);
-          },
-        }),
-      ],
-    });
-
-    const lane = (name: string, activity: string, priority: number) =>
-      defineWorkflow({
-        name,
-        activities: [
-          defineActivity({
-            name: activity,
-            priority,
-            startToCloseTimeout: 20000,
-            retry: { maximumAttempts: 8, initialInterval: 2000 },
-            runWhen: this.whenOnline,
-            execute: async a => {
-              const input = a.input as { jobId: string; endpoint: string; lane: string };
-              return this.deliver(input.endpoint, { jobId: input.jobId, kind: `lane-${input.lane}` }, input.jobId, a.attempt, a.signal);
-            },
-          }),
-        ],
-      });
-    const laneUrgent = lane('demo.lane.urgent', 'demo.lane.urgent.send', 90);
-    const laneNormal = lane('demo.lane.normal', 'demo.lane.normal.send', 50);
-    const laneBulk = lane('demo.lane.bulk', 'demo.lane.bulk.send', 10);
-
-    const exactlyOnce = defineWorkflow({
-      name: 'demo.exactlyOnce',
-      activities: [
-        defineActivity({
-          name: 'demo.once.send',
-          priority: 40,
-          startToCloseTimeout: 20000,
-          retry: { maximumAttempts: 8, initialInterval: 2000 },
-          runWhen: this.whenOnline,
-          execute: async a => {
-            const input = a.input as { jobId: string; endpoint: string; window: string };
-            return this.deliver(input.endpoint, { jobId: input.jobId, kind: 'summary', window: input.window }, input.jobId, a.attempt, a.signal);
-          },
-        }),
-      ],
-    });
-
-    const doomed = defineWorkflow({
-      name: 'demo.doomed',
-      activities: [
-        defineActivity({
-          name: 'demo.doomed.send',
-          priority: 40,
-          startToCloseTimeout: 20000,
-          retry: { maximumAttempts: 3, initialInterval: 1500 },
-          runWhen: this.whenOnline,
-          execute: async a => {
-            const input = a.input as { jobId: string };
-            return this.deliver(DOOMED_ENDPOINT, { jobId: input.jobId, kind: 'doomed' }, input.jobId, a.attempt, a.signal);
-          },
-        }),
-      ],
-    });
-
-    return [
-      { workflow: statusUpdate, description: 'Single delivery, held while offline, up to 8 attempts.' },
-      { workflow: flakyDelivery, description: 'Same shape, pointed at a server that really fails half the time.' },
-      { workflow: photoPipeline, description: 'Three stages; each stage’s result feeds the next.' },
-      { workflow: dutyReport, description: 'Gated on app state: holds unless the driver is on duty.' },
-      { workflow: laneUrgent, description: 'Priority 90 — jumps every queue.' },
-      { workflow: laneNormal, description: 'Priority 50 — the default lane.' },
-      { workflow: laneBulk, description: 'Priority 10 — heavy work that must never block the rest.' },
-      { workflow: exactlyOnce, description: 'Started with a uniqueKey; duplicate starts are ignored.' },
-      { workflow: doomed, description: 'Only 3 attempts against a server that always fails — meets the dead-letter queue.' },
-    ];
-  }
-
   // --- Lifecycle ------------------------------------------------------------
 
   /**
@@ -283,7 +83,12 @@ export class DemoEngineSession {
    */
   async open(): Promise<void> {
     if (this.client) return;
-    const client = await expoPlatform.createClient(DB_NAME, () => this.radioOnline);
+    // The activity worker: a separate Hermes runtime on its own OS
+    // thread. Every activity in this app executes there — the path is
+    // relative to THIS file (the babel plugin resolves it at build time).
+    const worker = new Worker('../workflows/endura.worker', { nativeModules: true });
+    this.worker = worker;
+    const client = await expoPlatform.createClient(DB_NAME, () => this.radioOnline, { worker });
     this.client = client;
 
     try {
@@ -298,7 +103,8 @@ export class DemoEngineSession {
       this.client?.environment?.setNetworkState?.(this.radioOnline);
     });
 
-    this.registered = this.buildRegistry();
+    // Same definitions the worker entry file registered on its side.
+    this.registered = demoWorkflows;
     for (const { workflow } of this.registered) client.registerWorkflow(workflow);
     // Production-style loop: the engine ticks itself from here on.
     void client.start({ tickInterval: 1000 }).catch(() => undefined);
@@ -312,6 +118,8 @@ export class DemoEngineSession {
     this.networkSub = null;
     client.stop();
     await client.close();
+    this.worker?.terminate();
+    this.worker = null;
   }
 
   /**
@@ -392,6 +200,11 @@ export class DemoEngineSession {
 
   queueDoomed(): Promise<string> {
     return this.start('demo.doomed', 'doomed', {});
+  }
+
+  /** N seconds of blocking math — on the worker thread. */
+  queueHeavyCompute(seconds = 5): Promise<string> {
+    return this.start('demo.heavyCompute', 'heavy', { seconds });
   }
 
   async retryDeadLetter(deadLetterId: string): Promise<void> {

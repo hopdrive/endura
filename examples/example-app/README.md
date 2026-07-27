@@ -61,7 +61,13 @@ inspector, with swipeable tabs:
 
 ## Running it
 
-### Quick start (Expo Go + dev server)
+> **This branch needs a dev build, not Expo Go.** Activities now execute
+> on a real worker thread via react-native-workers, which ships native
+> code that Expo Go does not contain. Build a dev client once
+> (`npx expo run:ios` / `run:android` or an EAS dev build) and iterate
+> with Metro as usual from there.
+
+### Quick start (dev build + dev server)
 
 ```bash
 # from the repo root: build + pack endura, install into the app
@@ -69,12 +75,12 @@ npm run build && npm pack --pack-destination /tmp
 cp /tmp/endura-0.1.0.tgz ./endura-0.1.0.tgz
 cd examples/example-app
 npm install
-npx expo start
+npx expo run:ios   # or: npx expo run:android — first time only
+npx expo start     # subsequent iterations
 ```
 
-Scan the QR with Expo Go (iOS or Android). This demos everything except one
-scenario: relaunching the app **while still offline** (a dev bundle can't be
-re-fetched without a network).
+This demos everything except one scenario: relaunching the app **while
+still offline** (a dev bundle can't be re-fetched without a network).
 
 ### Full offline testing (publish to your own Expo account)
 
@@ -91,8 +97,9 @@ npx eas-cli update:configure   # writes your updates.url into app.json
 npx eas-cli update --branch demo --message "my field build"
 ```
 
-Open the update once from the QR on your EAS dashboard (sign into Expo Go
-with the same account); from then on it launches offline. Notes:
+Open the update once from the QR on your EAS dashboard. On this branch
+the update must load into your **dev build** (Expo Go lacks the worker
+native module); from then on it launches offline. Notes:
 
 - `eas init` / `update:configure` write your personal `projectId`, `owner`,
   and `updates.url` into `app.json` — that's expected; don't commit them.
