@@ -16,6 +16,7 @@ import { WorkflowEngine } from '../../../src/core/engine';
 import { InMemoryStorage } from '../../../src/storage/memory';
 import { MockClock, MockScheduler, MockEnvironment } from '../../../src/core/mocks';
 import { defineActivity, defineWorkflow } from '../../../src/core/definitions';
+import { createLoopbackDispatcher } from '../../../src/workers/loopback';
 
 describe('reactive hooks (M6)', () => {
   let storage: InMemoryStorage;
@@ -30,6 +31,7 @@ describe('reactive hooks (M6)', () => {
     storage = new InMemoryStorage();
     const clock = new MockClock(1000000);
     engine = await WorkflowEngine.create({
+      dispatcher: createLoopbackDispatcher(),
       storage,
       clock,
       scheduler: new MockScheduler(clock),
@@ -147,6 +149,7 @@ describe('reactive hooks (M6)', () => {
     Object.defineProperty(bareStorage, 'subscribe', { value: undefined });
     const clock = new MockClock(1000000);
     const bareEngine = await WorkflowEngine.create({
+      dispatcher: createLoopbackDispatcher(),
       storage: bareStorage,
       clock,
       scheduler: new MockScheduler(clock),

@@ -17,6 +17,7 @@ import { InMemoryStorage } from '../../../../src/storage/memory';
 import { MockClock, MockScheduler, MockEnvironment } from '../../../../src/core/mocks';
 import { defineActivity, defineWorkflow } from '../../../../src/core/definitions';
 import { conditions } from '../../../../src/core/conditions';
+import { createLoopbackDispatcher } from '../../../../src/workers/loopback';
 
 describe('WorkflowEngine - runWhen Gating', () => {
   let storage: InMemoryStorage;
@@ -33,6 +34,7 @@ describe('WorkflowEngine - runWhen Gating', () => {
 
   async function createEngine(): Promise<WorkflowEngine> {
     return WorkflowEngine.create({
+      dispatcher: createLoopbackDispatcher(),
       storage,
       clock,
       scheduler,

@@ -9,12 +9,14 @@ import { describe, it, expect, vi } from 'vitest';
 import { ExpoWorkflowClient } from '../../../src/environmental/expo/ExpoWorkflowClient';
 import { InMemoryStorage } from '../../../src/storage/memory';
 import { defineActivity, defineWorkflow } from '../../../src/core/definitions';
+import { createLoopbackDispatcher } from '../../../src/workers/loopback';
 
 describe('ExpoWorkflowClient config passthrough', () => {
   it('forwards logger and stateSizeWarnBytes to the engine', async () => {
     const warn = vi.fn();
     const client = await ExpoWorkflowClient.create({
       storage: new InMemoryStorage(),
+      dispatcher: createLoopbackDispatcher(),
       logger: { debug: vi.fn(), info: vi.fn(), warn, error: vi.fn() },
       stateSizeWarnBytes: 64,
     });

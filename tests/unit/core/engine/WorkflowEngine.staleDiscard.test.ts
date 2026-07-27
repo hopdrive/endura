@@ -1,12 +1,13 @@
 /**
  * Unit Test: WorkflowEngine - Stale-result discard logging (P4 scenario 11).
  *
- * A timed-out handler KEEPS RUNNING (timeouts never cancel the promise —
- * load-bearing RNQ parity). The race already guarantees its late
- * settlement cannot overwrite newer state; these tests pin the
- * observability half of the contract: the eventual settlement is
- * LOGGED as discarded, so "the stale result was ignored" is visible in
- * production logs, not just implied by silence.
+ * A timed-out handler KEEPS RUNNING in the worker (timeouts never
+ * cancel the promise — load-bearing RNQ parity). The abort settles the
+ * engine-side attempt immediately, so the worker's eventual reply
+ * arrives for a task nobody is waiting on. These tests pin the
+ * observability half of the contract: that late reply is LOGGED as
+ * discarded (now by the WorkerDispatcher), so "the stale result was
+ * ignored" is visible in production logs, not just implied by silence.
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
@@ -16,6 +17,7 @@ import { MockClock, MockScheduler, MockEnvironment } from '../../../../src/core/
 import { defineActivity, defineWorkflow } from '../../../../src/core/definitions';
 import { Logger } from '../../../../src/core/types';
 import { sleep } from '../../../utils/testHelpers';
+import { createLoopbackDispatcher } from '../../../../src/workers/loopback';
 
 describe('WorkflowEngine - stale result discard logging', () => {
   let storage: InMemoryStorage;
@@ -57,7 +59,7 @@ describe('WorkflowEngine - stale result discard logging', () => {
   }
 
   async function runPastTimeoutThenComplete(hang: { resolve?: () => void; reject?: (err: Error) => void }) {
-    const engine = await WorkflowEngine.create({ storage, clock, scheduler, environment, logger });
+    const engine = await WorkflowEngine.create({ dispatcher: createLoopbackDispatcher(), storage, clock, scheduler, environment, logger });
     const workflow = hangingWorkflow(hang);
     engine.registerWorkflow(workflow);
     const execution = await engine.start(workflow, { input: {} });

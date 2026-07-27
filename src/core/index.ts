@@ -30,6 +30,10 @@ export {
   WorkflowCallbacks,
   Workflow,
 
+  // Dispatch types
+  ActivityDispatcher,
+  ActivityDispatchRequest,
+
   // Engine types
   StartWorkflowOptions,
   ExecutionQuery,

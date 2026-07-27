@@ -22,6 +22,7 @@ import { defineActivity, defineWorkflow } from '../../src/core/definitions';
 import { Workflow } from '../../src/core/types';
 import { SQLiteStorage } from '../../src/storage/sqlite';
 import { BetterSqlite3Driver } from '../../src/storage/sqlite/internal/BetterSqlite3Driver';
+import { createLoopbackDispatcher } from '../../src/workers/loopback';
 
 let tempDir: string;
 let dbPath: string;
@@ -60,6 +61,7 @@ async function boot(startTime: number) {
   await storage.initialize();
   const clock = new MockClock(startTime);
   const engine = await WorkflowEngine.create({
+    dispatcher: createLoopbackDispatcher(),
     storage,
     clock,
     scheduler: new MockScheduler(clock),

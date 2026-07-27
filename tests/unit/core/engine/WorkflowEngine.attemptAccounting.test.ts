@@ -14,9 +14,11 @@ import { MockClock, MockScheduler, MockEnvironment } from '../../../../src/core/
 import { defineActivity } from '../../../../src/core/definitions';
 import { Workflow } from '../../../../src/core/types';
 import { InMemoryStorage } from '../../../../src/storage/memory';
+import { createLoopbackDispatcher } from '../../../../src/workers/loopback';
 
 async function createEngine(storage: InMemoryStorage, clock: MockClock): Promise<WorkflowEngine> {
   return WorkflowEngine.create({
+    dispatcher: createLoopbackDispatcher(),
     storage,
     clock,
     scheduler: new MockScheduler(clock),

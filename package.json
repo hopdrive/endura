@@ -36,6 +36,11 @@
       "react-native": "./dist/react/index.js",
       "default": "./dist/react/index.js"
     },
+    "./workers": {
+      "types": "./dist/workers/index.d.ts",
+      "react-native": "./dist/workers/index.js",
+      "default": "./dist/workers/index.js"
+    },
     "./environmental/expo": {
       "types": "./dist/environmental/expo/index.d.ts",
       "react-native": "./dist/environmental/expo/index.js",

@@ -15,6 +15,7 @@ import { defineActivity } from '../../src/core/definitions';
 import { Workflow } from '../../src/core/types';
 import { SQLiteStorage } from '../../src/storage/sqlite';
 import { BetterSqlite3Driver } from '../../src/storage/sqlite/internal/BetterSqlite3Driver';
+import { createLoopbackDispatcher } from '../../src/workers/loopback';
 
 let shouldFail = true;
 
@@ -40,6 +41,7 @@ async function createHarness() {
   await storage.initialize();
   const clock = new MockClock(1000000);
   const engine = await WorkflowEngine.create({
+    dispatcher: createLoopbackDispatcher(),
     storage,
     clock,
     scheduler: new MockScheduler(clock),

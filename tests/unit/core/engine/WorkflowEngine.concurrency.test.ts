@@ -18,6 +18,7 @@ import { InMemoryStorage } from '../../../../src/storage/memory';
 import { MockClock, MockScheduler, MockEnvironment } from '../../../../src/core/mocks';
 import { defineActivity, defineWorkflow } from '../../../../src/core/definitions';
 import { createTestActivity, sleep } from '../../../utils/testHelpers';
+import { createLoopbackDispatcher } from '../../../../src/workers/loopback';
 
 describe('WorkflowEngine - Concurrency Safety', () => {
   let storage: InMemoryStorage;
@@ -34,6 +35,7 @@ describe('WorkflowEngine - Concurrency Safety', () => {
 
   async function createEngine(): Promise<WorkflowEngine> {
     return WorkflowEngine.create({
+      dispatcher: createLoopbackDispatcher(),
       storage,
       clock,
       scheduler,

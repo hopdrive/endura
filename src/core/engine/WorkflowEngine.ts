@@ -8,6 +8,8 @@ import {
   Clock,
   Scheduler,
   Environment,
+  ActivityDispatcher,
+  ActivityDispatchRequest,
   Logger,
   Workflow,
   Activity,
@@ -16,7 +18,6 @@ import {
   ActivityTask,
   DeadLetterRecord,
   WorkflowExecutionStatus,
-  ActivityContext,
   StartWorkflowOptions,
   TickOptions,
   EngineEvent,
@@ -80,6 +81,7 @@ export class WorkflowEngine {
   private clock: Clock;
   private scheduler: Scheduler;
   private environment: Environment;
+  private dispatcher: ActivityDispatcher;
   private logger: Logger;
   private onEvent?: (event: EngineEvent) => void;
   private cleanup?: CleanupConfig;
@@ -110,7 +112,9 @@ export class WorkflowEngine {
     this.clock = config.clock;
     this.scheduler = config.scheduler;
     this.environment = config.environment;
+    this.dispatcher = config.dispatcher;
     this.logger = config.logger ?? silentLogger;
+    this.dispatcher.setLogger?.(this.logger);
     this.onEvent = config.onEvent;
     this.cleanup = config.cleanup;
     this.leaseDurationMs = config.leaseDurationMs ?? DEFAULT_LEASE_MS;
@@ -295,6 +299,18 @@ export class WorkflowEngine {
       this.logger.warn('Workflow already registered, overwriting', { name: workflow.name });
     }
     this.workflows.set(workflow.name, workflow);
+
+    // Mirror the registration into the dispatcher. Worker dispatchers
+    // ignore this (their bundle registers its own copy); loopback
+    // dispatchers use it to stay in sync with the engine.
+    try {
+      this.dispatcher.onWorkflowRegistered?.(workflow);
+    } catch (err) {
+      this.logger.error('Dispatcher registration hook failed', {
+        workflowName: workflow.name,
+        error: String(err),
+      });
+    }
 
     // Rebuild the activity map from every registered workflow rather
     // than accumulating: re-registering a changed definition must not
@@ -791,28 +807,27 @@ export class WorkflowEngine {
     };
     scheduleHeartbeat();
 
-    // Create activity context
+    // Build the dispatch request. The activity's execute() never runs
+    // here — user code lives in the worker runtime; the engine only
+    // ships plain data across and waits for the settled attempt.
     const runtimeContext = this.environment.getRuntimeContext();
-    const context: ActivityContext = {
-      ...runtimeContext,
-      runId: task.runId,
+    const request: ActivityDispatchRequest = {
       taskId: task.taskId,
+      runId: task.runId,
+      activityName: task.activityName,
       attempt: task.attempts,
       input: task.input,
-      signal,
-      log: (...args: unknown[]) => {
-        this.logger.debug(`[Activity:${task.activityName}]`, { args, taskId: task.taskId });
-      },
+      runtime: runtimeContext,
     };
 
-    // Race the activity against the abort signal. Awaiting the handler
-    // directly would let one hung handler (that ignores ctx.signal)
-    // wedge the serial engine forever. Once the abort wins, any late
-    // settlement of the handler is dropped — the failure already
-    // recorded must not be overwritten (stale-success guard).
+    // Race the attempt against the abort signal. The dispatcher rejects
+    // promptly on abort by contract, but the race stays as a backstop —
+    // a misbehaving dispatcher must not wedge the serial engine forever.
+    // Once the abort wins, any late settlement is dropped — the failure
+    // already recorded must not be overwritten (stale-success guard).
     // Async wrapper so a synchronous throw from execute() becomes a
     // rejection handled by the same failure path as async errors.
-    const executePromise = (async () => activity.execute(context))();
+    const executePromise = (async () => this.dispatcher.execute(request, signal))();
     let handlerSettled = false;
     const markSettled = () => {
       handlerSettled = true;

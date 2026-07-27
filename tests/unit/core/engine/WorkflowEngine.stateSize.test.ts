@@ -15,11 +15,13 @@ import { InMemoryStorage } from '../../../../src/storage/memory';
 import { MockClock, MockScheduler, MockEnvironment } from '../../../../src/core/mocks';
 import { defineActivity, defineWorkflow } from '../../../../src/core/definitions';
 import { AnyActivity, WorkflowEngineConfig } from '../../../../src/core/types';
+import { createLoopbackDispatcher } from '../../../../src/workers/loopback';
 
 async function createEngine(config?: Partial<WorkflowEngineConfig>) {
   const warn = vi.fn();
   const clock = new MockClock(1000000);
   const engine = await WorkflowEngine.create({
+    dispatcher: createLoopbackDispatcher(),
     storage: new InMemoryStorage(),
     clock,
     scheduler: new MockScheduler(clock),

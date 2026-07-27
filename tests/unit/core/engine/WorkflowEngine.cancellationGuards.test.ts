@@ -20,6 +20,7 @@ import { InMemoryStorage } from '../../../../src/storage/memory';
 import { MockClock, MockScheduler, MockEnvironment } from '../../../../src/core/mocks';
 import { defineActivity, defineWorkflow } from '../../../../src/core/definitions';
 import { Workflow } from '../../../../src/core/types';
+import { createLoopbackDispatcher } from '../../../../src/workers/loopback';
 
 interface Deferred {
   resolve: (value: Record<string, unknown>) => void;
@@ -42,7 +43,7 @@ describe('WorkflowEngine - Cancellation guards (H3)', () => {
   });
 
   async function createEngine(): Promise<WorkflowEngine> {
-    return WorkflowEngine.create({ storage, clock, scheduler, environment });
+    return WorkflowEngine.create({ dispatcher: createLoopbackDispatcher(), storage, clock, scheduler, environment });
   }
 
   function deferredWorkflow(maxAttempts: number): { workflow: Workflow; executed: string[] } {

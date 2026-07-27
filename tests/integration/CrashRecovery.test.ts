@@ -21,6 +21,7 @@ import { MockClock, MockScheduler, MockEnvironment } from '../../src/core/mocks'
 import { defineActivity, defineWorkflow } from '../../src/core/definitions';
 import { conditions } from '../../src/core/conditions';
 import { runToCompletion, TestContext } from '../utils/testHelpers';
+import { createLoopbackDispatcher } from '../../src/workers/loopback';
 
 describe('Crash Recovery Integration', () => {
   // Shared storage persists across "crashes"
@@ -49,6 +50,7 @@ describe('Crash Recovery Integration', () => {
   async function createEngine(): Promise<WorkflowEngine> {
     const scheduler = new MockScheduler(clock);
     const engine = await WorkflowEngine.create({
+      dispatcher: createLoopbackDispatcher(),
       storage,
       clock,
       scheduler,
@@ -64,6 +66,7 @@ describe('Crash Recovery Integration', () => {
   async function restartEngine(): Promise<WorkflowEngine> {
     const scheduler = new MockScheduler(clock);
     const engine = await WorkflowEngine.create({
+      dispatcher: createLoopbackDispatcher(),
       storage,
       clock,
       scheduler,

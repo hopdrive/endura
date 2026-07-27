@@ -14,9 +14,16 @@ Build offline-first workflows that survive app crashes, network failures, and de
 
 ---
 
+> **Experimental branch note:** on this branch, every activity executes
+> on a real background thread via
+> [react-native-workers](https://github.com/ammarahm-ed/react-native-workers).
+> Activity code cannot block the UI, no matter what it does. See
+> [Worker Execution](#worker-execution) for setup and what changed.
+
 ## Table of Contents
 
 - [Quick Start](#quick-start)
+- [Worker Execution](#worker-execution)
 - [See It Running](#see-it-running)
 - [Why This Exists](#why-this-exists)
 - [Origin Story](#origin-story)
@@ -96,12 +103,27 @@ export const photoWorkflow = defineWorkflow({
 });
 ```
 
+### Create the Worker Entry File
+
+Activities execute on a background thread, so they live in a worker
+bundle. The entry file just hands your workflow definitions (the same
+modules the app imports) to the activity host:
+
+```typescript
+// workflows/endura.worker.ts
+import { createActivityHost } from 'endura/workers';
+import { photoWorkflow } from './photo';
+
+createActivityHost({ workflows: [photoWorkflow] });
+```
+
 ### Start the Engine
 
 ```typescript
 // App.tsx
 import { SQLiteStorage, ExpoSqliteDriver } from 'endura/storage/sqlite';
 import { ExpoWorkflowClient } from 'endura/environmental/expo';
+import { Worker } from '@ammarahmed/react-native-workers';
 import { openDatabaseAsync } from 'expo-sqlite';
 import NetInfo from '@react-native-community/netinfo';
 import { photoWorkflow } from './workflows/photo';
@@ -111,9 +133,13 @@ const driver = await ExpoSqliteDriver.create('workflow.db', openDatabaseAsync);
 const storage = new SQLiteStorage(driver);
 await storage.initialize();
 
+// Create the activity worker (nativeModules lets activities use fetch etc.)
+const worker = new Worker('./workflows/endura.worker', { nativeModules: true });
+
 // Create client
 const client = await ExpoWorkflowClient.create({
   storage,
+  worker,
   environment: {
     getNetworkState: async () => {
       const state = await NetInfo.fetch();
@@ -137,6 +163,128 @@ That's it! The workflow will:
 - Retry failed activities with backoff
 - Wait for network before upload activities
 - Track progress through each stage
+- Run every activity on a background thread, never the UI thread
+
+---
+
+## Worker Execution
+
+Every activity executes in a separate JavaScript runtime on its own OS
+thread, powered by [react-native-workers](https://github.com/ammarahm-ed/react-native-workers).
+This is not optional and needs no per-activity configuration: it is how
+the engine runs. The payoff is a hard guarantee: **nothing you do
+inside an activity can block the UI.** Hash a file, resize an image,
+parse megabytes of JSON, or just do 5 seconds of math in a loop; the
+app stays at 60fps.
+
+### Setup
+
+1. Install the worker library in your app:
+
+   ```bash
+   npm install @ammarahmed/react-native-workers@alpha
+   ```
+
+2. Add the Babel plugin and Metro wrapper to your app:
+
+   ```javascript
+   // babel.config.js
+   module.exports = {
+     presets: ['babel-preset-expo'],
+     plugins: ['@ammarahmed/react-native-workers/babel'],
+   };
+   ```
+
+   ```javascript
+   // metro.config.js
+   const { getDefaultConfig } = require('expo/metro-config');
+   const { withWorkers } = require('@ammarahmed/react-native-workers/metro');
+
+   module.exports = withWorkers(getDefaultConfig(__dirname));
+   ```
+
+3. Create the worker entry file and pass a Worker to the client (see
+   Quick Start above).
+
+### What runs where
+
+| On the worker thread | On the main thread |
+|---|---|
+| `execute()` — all of it | The engine loop (scheduling, leases, retries, timeouts) |
+| `ctx.log` (relayed to the engine logger) | SQLite persistence |
+| `ctx.signal` (relayed abort) | `runWhen` conditions |
+| | Lifecycle callbacks: `onStart`, `onSuccess`, `onFailure`, `onFailed`, `onSkipped` |
+| | Workflow callbacks: `onComplete`, `onFailed`, `onCancelled` |
+
+The split matters: callbacks and conditions are engine-side hooks and
+may touch app state freely. `execute()` is the only thing that crosses
+the thread boundary, and it runs in another JavaScript world.
+
+### The two rules worker execution adds
+
+**1. Activities can only use what the worker bundle contains.** An
+activity function can no longer reach out and use variables from your
+app at run time (the logged-in user object, a module-level API client
+holding app state). The worker bundle gets its own copy of every module
+the worker entry file imports. Anything else the activity needs must
+arrive through its input. This was always the design intent
+("small, idempotent, restartable"); now it is enforced by physics.
+
+**2. Inputs and outputs must be plain data.** Values cross the thread
+boundary by structured clone: objects, arrays, strings, numbers, Dates,
+typed arrays. Functions and native handles don't travel. Endura already
+required JSON-safe state for persistence, so in practice this changes
+nothing; if an activity returns something untransferable, the attempt
+fails with an explicit error instead of silently misbehaving.
+
+### Registration happens twice, from the same modules
+
+The main bundle registers workflows with the client (so the engine
+knows names, options, retry policies, conditions). The worker entry
+file registers the same workflow modules with `createActivityHost` (so
+the worker has the `execute` functions). Import the same files in both
+places and they cannot drift. If the worker bundle is missing an
+activity the engine dispatches, the task fails immediately with an
+`ActivityNotInWorkerBundleError` telling you which file to fix.
+
+### Failure semantics across the boundary
+
+- Errors thrown in an activity are flattened, shipped back, and rebuilt
+  with name, message, stack, and the `nonRetryable` flag intact. Retry
+  classification works exactly as before.
+- If the worker itself crashes, every in-flight attempt fails with a
+  retryable `WorkerCrashedError` and re-enters the normal retry budget.
+- On timeout or cancellation the engine settles immediately (it never
+  waits for a worker stuck in synchronous code); the abort is relayed so
+  `ctx.signal` still fires in the worker, and any late result is logged
+  as discarded.
+
+### Testing without a device
+
+Node has no react-native-workers, so tests use a loopback dispatcher:
+the real dispatcher and the real activity host talking over an
+in-process channel that structured-clones every message. The whole
+endura test suite runs through it, which means the message protocol
+itself is exercised by all 450+ tests.
+
+```typescript
+import { createLoopbackDispatcher } from 'endura/testing';
+
+const client = await ExpoWorkflowClient.create({
+  storage,
+  dispatcher: createLoopbackDispatcher(),  // instead of { worker }
+});
+```
+
+### Current constraints
+
+- react-native-workers is alpha: New Architecture only, React Native
+  0.81.4+ / Expo SDK 54+, and release builds need its bundling guide
+  followed (dev builds are served by Metro automatically).
+- Activities that call `fetch` or other platform modules need the
+  worker created with `{ nativeModules: true }`.
+- One worker executes all activities; the engine dispatches them
+  one at a time, same as before.
 
 ---
 
@@ -2127,20 +2275,14 @@ const paymentWorkflow = defineWorkflow({
 
 ### True Background Threading
 
-React Native's new architecture may enable running activities on separate threads:
+**Shipped on this branch** — all activities always execute on a worker
+thread; see [Worker Execution](#worker-execution). No `runOnThread`
+flag exists because there is nothing to opt into: it is the only mode.
 
-```typescript
-// Possible future API
-defineActivity({
-  name: 'processImage',
-  execute: async (ctx) => { /* heavy computation */ },
-  options: {
-    runOnThread: true,
-  },
-});
-```
-
-Current activities are mostly I/O-bound where async concurrency is sufficient.
+The remaining north star is moving the engine itself (scheduling,
+SQLite, state serialization) into the worker too, leaving only a thin
+client on the main runtime. That waits on react-native-workers
+stabilizing and on a cross-runtime story for the React hooks.
 
 ### Example App & E2E Testing
 

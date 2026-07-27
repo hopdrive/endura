@@ -21,6 +21,7 @@ import { InMemoryStorage } from '../../../../src/storage/memory';
 import { MockClock, MockScheduler, MockEnvironment } from '../../../../src/core/mocks';
 import { defineActivity, defineWorkflow } from '../../../../src/core/definitions';
 import { NonRetryableError } from '../../../../src/core/types';
+import { createLoopbackDispatcher } from '../../../../src/workers/loopback';
 
 describe('WorkflowEngine - NonRetryableError (M1)', () => {
   let storage: InMemoryStorage;
@@ -36,7 +37,7 @@ describe('WorkflowEngine - NonRetryableError (M1)', () => {
   });
 
   async function createEngine(): Promise<WorkflowEngine> {
-    return WorkflowEngine.create({ storage, clock, scheduler, environment });
+    return WorkflowEngine.create({ dispatcher: createLoopbackDispatcher(), storage, clock, scheduler, environment });
   }
 
   it('should dead-letter immediately on NonRetryableError despite remaining budget', async () => {

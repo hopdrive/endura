@@ -19,6 +19,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { ExpoWorkflowClient } from '../../../src/environmental/expo/ExpoWorkflowClient';
 import { ExpoEnvironment } from '../../../src/environmental/expo/ExpoEnvironment';
+import { createLoopbackDispatcher } from '../../../src/workers/loopback';
 import {
   runBackgroundWorkflowTask,
   BackgroundFetchResult,
@@ -75,7 +76,7 @@ describe('ExpoEnvironment lifecycle (H8)', () => {
 describe('ExpoWorkflowClient lifecycle (H8)', () => {
   it('stop() ends a start() that has no lifespan', async () => {
     const storage = new InMemoryStorage();
-    const client = await ExpoWorkflowClient.create({ storage });
+    const client = await ExpoWorkflowClient.create({ storage, dispatcher: createLoopbackDispatcher() });
 
     const startPromise = client.start({ tickInterval: 10 });
     await new Promise(resolve => setTimeout(resolve, 50));
@@ -93,6 +94,7 @@ describe('ExpoWorkflowClient lifecycle (H8)', () => {
     const storage = new InMemoryStorage();
     const client = await ExpoWorkflowClient.create({
       storage,
+      dispatcher: createLoopbackDispatcher(),
       environment: { getNetworkState },
     });
 
@@ -117,6 +119,7 @@ describe('runBackgroundWorkflowTask honest results (H8)', () => {
 
     const result = await runBackgroundWorkflowTask({
       storage,
+      dispatcher: createLoopbackDispatcher(),
       workflows: [quickWorkflow([])],
       lifespan: 700,
       onComplete: count => {
@@ -134,12 +137,13 @@ describe('runBackgroundWorkflowTask honest results (H8)', () => {
     const workflow = quickWorkflow(executed);
 
     // Seed work: a foreground client enqueues, then "the app dies"
-    const seeder = await ExpoWorkflowClient.create({ storage });
+    const seeder = await ExpoWorkflowClient.create({ storage, dispatcher: createLoopbackDispatcher() });
     const execution = await seeder.start_workflow(workflow, { input: {} });
 
     let completedCount = -1;
     const result = await runBackgroundWorkflowTask({
       storage,
+      dispatcher: createLoopbackDispatcher(),
       workflows: [workflow],
       lifespan: 1500,
       onComplete: count => {
@@ -165,6 +169,7 @@ describe('runBackgroundWorkflowTask honest results (H8)', () => {
     let seenError: Error | null = null;
     const result = await runBackgroundWorkflowTask({
       storage,
+      dispatcher: createLoopbackDispatcher(),
       workflows: [quickWorkflow([])],
       lifespan: 400,
       onError: error => {

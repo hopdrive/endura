@@ -34,6 +34,7 @@ import { WorkflowExecution, ActivityContext } from '../../src/core/types';
 import { InMemoryStorage } from '../../src/storage/memory';
 import { MockClock, MockScheduler, MockEnvironment } from '../../src/core/mocks';
 import { defineActivity } from '../../src/core/definitions';
+import { createLoopbackDispatcher } from '../../src/workers/loopback';
 
 // =============================================================================
 // Test Context
@@ -92,6 +93,7 @@ export async function createTestContext(
   });
 
   const engine = await WorkflowEngine.create({
+    dispatcher: createLoopbackDispatcher(),
     storage,
     clock,
     scheduler,

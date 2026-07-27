@@ -17,6 +17,7 @@ import { InMemoryStorage } from '../../../../src/storage/memory';
 import { SQLiteStorage } from '../../../../src/storage/sqlite';
 import { BetterSqlite3Driver } from '../../../../src/storage/sqlite/internal/BetterSqlite3Driver';
 import { SQLiteDriver, SQLiteResult, SQLiteRow } from '../../../../src/storage/sqlite/internal/SQLiteDriver';
+import { createLoopbackDispatcher } from '../../../../src/workers/loopback';
 
 const flush = () => new Promise<void>(resolve => setImmediate(resolve));
 
@@ -26,6 +27,7 @@ describe('hung handler containment (H1)', () => {
     const clock = new MockClock(1000000);
     const scheduler = new MockScheduler(clock);
     const engine = await WorkflowEngine.create({
+      dispatcher: createLoopbackDispatcher(),
       storage,
       clock,
       scheduler,
@@ -81,6 +83,7 @@ describe('hung handler containment (H1)', () => {
     const clock = new MockClock(1000000);
     const scheduler = new MockScheduler(clock);
     const engine = await WorkflowEngine.create({
+      dispatcher: createLoopbackDispatcher(),
       storage,
       clock,
       scheduler,
@@ -163,6 +166,7 @@ describe('storage-error containment (H2)', () => {
     await storage.initialize();
     const clock = new MockClock(1000000);
     const engine = await WorkflowEngine.create({
+      dispatcher: createLoopbackDispatcher(),
       storage,
       clock,
       scheduler: new MockScheduler(clock),

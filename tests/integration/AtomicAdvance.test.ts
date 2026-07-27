@@ -16,6 +16,7 @@ import { Workflow, WorkflowExecution, ActivityTask } from '../../src/core/types'
 import { SQLiteStorage } from '../../src/storage/sqlite';
 import { BetterSqlite3Driver } from '../../src/storage/sqlite/internal/BetterSqlite3Driver';
 import { SQLiteDriver, SQLiteResult, SQLiteRow } from '../../src/storage/sqlite/internal/SQLiteDriver';
+import { createLoopbackDispatcher } from '../../src/workers/loopback';
 
 /**
  * Driver wrapper that throws on a matching statement — once — to simulate
@@ -89,6 +90,7 @@ async function createHarness(existing?: { driver: FaultInjectingDriver; storage:
 
   const clock = new MockClock(1000000);
   const engine = await WorkflowEngine.create({
+    dispatcher: createLoopbackDispatcher(),
     storage,
     clock,
     scheduler: new MockScheduler(clock),

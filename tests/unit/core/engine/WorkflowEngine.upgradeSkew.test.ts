@@ -21,6 +21,7 @@ import { InMemoryStorage } from '../../../../src/storage/memory';
 import { MockClock, MockScheduler, MockEnvironment } from '../../../../src/core/mocks';
 import { defineActivity, defineWorkflow } from '../../../../src/core/definitions';
 import { Workflow, EngineEvent } from '../../../../src/core/types';
+import { createLoopbackDispatcher } from '../../../../src/workers/loopback';
 
 describe('WorkflowEngine - Upgrade skew (H7)', () => {
   let storage: InMemoryStorage;
@@ -36,7 +37,7 @@ describe('WorkflowEngine - Upgrade skew (H7)', () => {
   });
 
   async function createEngine(onEvent?: (event: EngineEvent) => void): Promise<WorkflowEngine> {
-    return WorkflowEngine.create({ storage, clock, scheduler, environment, onEvent });
+    return WorkflowEngine.create({ dispatcher: createLoopbackDispatcher(), storage, clock, scheduler, environment, onEvent });
   }
 
   function step(name: string, executed: string[]) {

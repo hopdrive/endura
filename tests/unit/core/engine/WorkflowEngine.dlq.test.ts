@@ -17,6 +17,7 @@ import { WorkflowEngine } from '../../../../src/core/engine/WorkflowEngine';
 import { InMemoryStorage } from '../../../../src/storage/memory';
 import { MockClock, MockScheduler, MockEnvironment } from '../../../../src/core/mocks';
 import { defineActivity, defineWorkflow } from '../../../../src/core/definitions';
+import { createLoopbackDispatcher } from '../../../../src/workers/loopback';
 
 describe('WorkflowEngine - Dead Letter Queue', () => {
   let storage: InMemoryStorage;
@@ -33,6 +34,7 @@ describe('WorkflowEngine - Dead Letter Queue', () => {
 
   async function createEngine(): Promise<WorkflowEngine> {
     return WorkflowEngine.create({
+      dispatcher: createLoopbackDispatcher(),
       storage,
       clock,
       scheduler,
@@ -408,6 +410,7 @@ describe('WorkflowEngine - Dead Letter Queue', () => {
       const events: Array<{ type: string; runId?: string }> = [];
 
       const engine = await WorkflowEngine.create({
+        dispatcher: createLoopbackDispatcher(),
         storage,
         clock,
         scheduler,
