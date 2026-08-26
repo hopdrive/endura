@@ -40,25 +40,22 @@ which commit and which workflow run produced a given tarball.
 
 ## First-time setup, done once
 
-Configuring a trusted publisher requires the package to already exist on npmjs, so
-the first publish is manual.
+Configuring a trusted publisher requires the package to already exist on npmjs. It
+does: `endura@0.1.0` is on the registry. That publish was a mistake, run by hand
+from the `experimental/workers-rewrite` branch rather than master, so it ships a
+`endura/workers` entry point that exists on no commit of master. We are leaving it
+up rather than unpublishing, and the next release supersedes it.
 
-```bash
-npm login
-npm run clean && npm run build
-npm publish --access public
-```
-
-`prepublishOnly` cleans and builds again on its own, so a stale `dist/` cannot ship
-even if you skip the build above.
-
-Then, on npmjs.com, open the `endura` package settings, go to the trusted publisher
-section, and point it at:
+So there is nothing left to publish by hand. The one remaining step is on npmjs.com:
+open the `endura` package settings, find the trusted publisher section, and point it
+at:
 
 - Repository `hopdrive/endura`
 - Workflow filename `release.yml`
 
-After that, every release goes through the workflow and no human publishes again.
+Do that before the first workflow run, or the publish fails with an authentication
+error. After that, every release goes through the workflow and no human publishes
+again.
 
 ## Things that will bite you
 
