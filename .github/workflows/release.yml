@@ -1,0 +1,87 @@
+name: Release
+
+# Changesets-driven release automation (mirrors hopdrive/eventkit's release flow).
+#
+# On every push to master this runs the changesets action, which does ONE of two
+# things depending on whether unreleased changesets exist in .changeset/:
+#
+#   1. Changesets present  -> open/update a "chore: version packages" PR that
+#      consumes them, bumps the version in package.json, and writes CHANGELOG.md.
+#      Merging that PR is the human gate on the next release.
+#   2. No changesets left (the version PR was just merged) -> run `npm run release`
+#      (clean + build + `changeset publish`) to publish to npm and cut a matching
+#      GitHub Release. Versions are never bumped or published by hand.
+#
+# Auth: npm Trusted Publishing via GitHub OIDC — NO stored npm token. npmjs must
+# have a trusted publisher configured for the `endura` package pointing at
+# `hopdrive/endura` + this workflow file (`release.yml`). That configuration
+# requires the package to exist, so the FIRST publish is manual. See
+# docs/RELEASING.md.
+#
+# Because the repo is public, publishes also carry build provenance (the "signed
+# on GitHub Actions" badge on npm).
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch: # allow manual re-trigger (e.g. to retry a failed publish)
+
+# Never let two release runs race the version PR / publish.
+concurrency: ${{ github.workflow }}-${{ github.ref }}
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # commit the version bump, push tags, create releases
+      pull-requests: write # open/update the "chore: version packages" PR
+      id-token: write # OIDC token for npm Trusted Publishing (no stored secret)
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Node 24 bundles npm 11.x, which supports OIDC Trusted Publishing +
+          # provenance natively. Node 20's bundled npm is 10.x and a global
+          # `npm i -g npm@latest` did NOT reliably replace the npm the publish
+          # step used (it still ENEEDAUTH'd), so pin the runtime instead.
+          node-version: 24
+          cache: npm
+          # No registry-url/token wiring: leaving setup-node's .npmrc unwritten
+          # keeps the publish on the OIDC path (an empty _authToken line would
+          # shadow trusted publishing). The registry comes from package.json
+          # "publishConfig".
+
+      # Use Node 24's bundled npm as-is (11.5.1+, which supports OIDC Trusted
+      # Publishing + provenance natively). We deliberately do NOT `npm install -g
+      # npm@latest` here: reinstalling npm over the bundled copy drops some of npm's
+      # own *bundled* transitive deps — notably `sigstore`, which `libnpmpublish`
+      # loads to build the provenance attestation under `NPM_CONFIG_PROVENANCE`.
+      # That self-update is what broke eventkit's 0.5.0 publish ("Cannot find
+      # module 'sigstore'" from libnpmpublish/lib/provenance.js). The pristine
+      # bundled npm ships sigstore intact. Print the versions so the publish npm
+      # stays auditable.
+      - name: Print npm/node versions
+        run: |
+          node -v
+          npm -v
+
+      - run: npm ci
+
+      - name: Create Release Pull Request or Publish to npm
+        id: changesets
+        uses: changesets/action@v1
+        with:
+          version: npm run version # `changeset version` — bump + changelog for the PR
+          publish: npm run release # clean + build + `changeset publish`
+          title: 'chore: version packages'
+          commit: 'chore: version packages'
+          createGithubReleases: true
+        env:
+          # Lets the action open the version PR and create GitHub Releases.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Publish auth is GitHub OIDC (npm Trusted Publishing) — no NPM token.
+          # Emit build provenance (repo is public, so it's publicly verifiable).
+          NPM_CONFIG_PROVENANCE: 'true'
+          # `prepare` runs husky, which has no job on a CI checkout.
+          HUSKY: '0'
