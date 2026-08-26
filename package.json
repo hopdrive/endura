@@ -1,6 +1,6 @@
 {
   "name": "endura",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Durable execution for React Native. Build offline-first workflows that survive app crashes, network failures, and device restarts.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
