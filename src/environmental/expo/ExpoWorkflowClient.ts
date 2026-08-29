@@ -5,8 +5,10 @@
  */
 
 import { WorkflowEngine } from '../../core/engine';
-import { Storage, Logger } from '../../core/types';
+import { ActivityDispatcher, Storage, Logger } from '../../core/types';
 import { setIdGenerator } from '../../core/utils';
+import { WorkerDispatcher } from '../../workers/WorkerDispatcher';
+import { WorkerLike } from '../../workers/protocol';
 import { ExpoClock } from './ExpoClock';
 import { ExpoScheduler } from './ExpoScheduler';
 import { ExpoEnvironment, ExpoEnvironmentOptions } from './ExpoEnvironment';
@@ -47,6 +49,31 @@ export interface ExpoWorkflowClientOptions {
    * ```
    */
   storage: Storage;
+
+  /**
+   * The worker that executes ALL activities, created by the app with
+   * react-native-workers so the bundler can see the entry file:
+   *
+   * ```typescript
+   * import { Worker } from '@ammarahmed/react-native-workers';
+   *
+   * // workflows/endura.worker.ts calls createActivityHost(...)
+   * const worker = new Worker('./workflows/endura.worker', { nativeModules: true });
+   * const client = await ExpoWorkflowClient.create({ storage, worker });
+   * ```
+   *
+   * Give endura a dedicated worker — the dispatcher owns its message
+   * handlers.
+   */
+  worker?: WorkerLike;
+
+  /**
+   * Escape hatch for tests and unusual runtimes: a pre-built dispatcher
+   * instead of a worker (e.g. createLoopbackDispatcher from
+   * 'endura/testing'). Exactly one of `worker` or `dispatcher` is
+   * required.
+   */
+  dispatcher?: ActivityDispatcher;
 
   /**
    * Environment options for network state and battery level.
@@ -141,6 +168,19 @@ export class ExpoWorkflowClient {
 
     const storage = options.storage;
 
+    if (!options.worker && !options.dispatcher) {
+      throw new Error(
+        'ExpoWorkflowClient.create requires a worker: activities always execute on a worker ' +
+          'thread. Create one with react-native-workers pointing at your worker entry file ' +
+          "(the file that calls createActivityHost from 'endura/workers') and pass it as " +
+          '{ worker }. Tests can pass { dispatcher: createLoopbackDispatcher() } instead.'
+      );
+    }
+    if (options.worker && options.dispatcher) {
+      throw new Error('Pass either { worker } or { dispatcher }, not both.');
+    }
+    const dispatcher = options.dispatcher ?? new WorkerDispatcher(options.worker!, { logger: options.logger });
+
     // Create runtime adapters
     const clock = new ExpoClock();
     const scheduler = new ExpoScheduler();
@@ -152,6 +192,7 @@ export class ExpoWorkflowClient {
       clock,
       scheduler,
       environment,
+      dispatcher,
       onEvent: options.onEvent,
       leaseDurationMs: options.leaseDurationMs,
       logger: options.logger,

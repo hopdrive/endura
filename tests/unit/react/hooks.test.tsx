@@ -5,6 +5,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { renderHook, act, waitFor } from '@testing-library/react';
+import { createLoopbackDispatcher } from '../../../src/workers/loopback';
 import {
   useExecution,
   useExecutionsByStatus,
@@ -31,6 +32,7 @@ describe('React Hooks', () => {
     scheduler = new MockScheduler(clock);
     environment = new MockEnvironment({ isConnected: true });
     engine = await WorkflowEngine.create({
+      dispatcher: createLoopbackDispatcher(),
       storage,
       clock,
       scheduler,

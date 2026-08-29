@@ -19,6 +19,7 @@ import { InMemoryStorage } from '../../../../src/storage/memory';
 import { MockClock, MockScheduler, MockEnvironment } from '../../../../src/core/mocks';
 import { defineActivity, defineWorkflow } from '../../../../src/core/definitions';
 import { createTestActivity } from '../../../utils/testHelpers';
+import { createLoopbackDispatcher } from '../../../../src/workers/loopback';
 
 describe('WorkflowEngine - Input Validation', () => {
   let storage: InMemoryStorage;
@@ -35,6 +36,7 @@ describe('WorkflowEngine - Input Validation', () => {
 
   async function createEngine(): Promise<WorkflowEngine> {
     return WorkflowEngine.create({
+      dispatcher: createLoopbackDispatcher(),
       storage,
       clock,
       scheduler,

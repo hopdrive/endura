@@ -397,6 +397,58 @@ export interface EngineEvent {
   [key: string]: unknown;
 }
 
+// ============================================================================
+// Activity Dispatch (worker execution boundary)
+// ============================================================================
+
+/**
+ * Everything the engine sends across the thread boundary to run one
+ * activity attempt. Must survive structured clone: plain data only.
+ */
+export interface ActivityDispatchRequest {
+  taskId: string;
+  runId: string;
+  activityName: string;
+  /** Current attempt number (1-based) */
+  attempt: number;
+  /** Accumulated workflow state (the activity's ctx.input) */
+  input: Record<string, unknown>;
+  /** Runtime context snapshot (isConnected, batteryLevel, ...) */
+  runtime: RuntimeContext;
+}
+
+/**
+ * Runs activity attempts. The engine never calls activity.execute()
+ * itself — every attempt goes through the dispatcher, which is how all
+ * user code ends up on a worker thread instead of the UI thread.
+ *
+ * The engine keeps everything else on its own side: scheduling, leases,
+ * retries, timeouts, runWhen conditions, and lifecycle callbacks.
+ */
+export interface ActivityDispatcher {
+  /**
+   * Run one activity attempt. Resolves with the activity's return value,
+   * rejects with its error. `signal` aborts on cancel or timeout — the
+   * dispatcher forwards it to the worker and rejects promptly without
+   * waiting for the worker to respond.
+   */
+  execute(
+    request: ActivityDispatchRequest,
+    signal: AbortSignal
+  ): Promise<Record<string, unknown> | undefined>;
+  /**
+   * Called whenever the engine registers a workflow. Real worker
+   * dispatchers ignore this (the worker bundle registers its own copy of
+   * the definitions); in-process dispatchers use it to mirror the
+   * engine's registry.
+   */
+  onWorkflowRegistered?(workflow: Workflow): void;
+  /** Adopt the engine's logger (relayed worker logs land here). */
+  setLogger?(logger: Logger): void;
+  /** Release resources (listeners, pending settlements). */
+  dispose?(): void;
+}
+
 /**
  * Cleanup configuration.
  */
@@ -424,6 +476,14 @@ export interface WorkflowEngineConfig {
   scheduler: Scheduler;
   /** Environment for runtime context */
   environment: Environment;
+  /**
+   * Executes activity attempts. Activities ALWAYS run through the
+   * dispatcher — on device that means a worker thread
+   * (WorkerDispatcher over @ammarahmed/react-native-workers); in Node
+   * tests, a loopback dispatcher that speaks the same message protocol
+   * in-process.
+   */
+  dispatcher: ActivityDispatcher;
   /** Logger for observability */
   logger?: Logger;
   /** Event handler for observability */

@@ -71,6 +71,59 @@ await client.start({ tickInterval: 1000 }); // that's it`,
     ],
   },
   {
+    id: 'thread',
+    icon: '🧵',
+    tint: '#AF52DE',
+    tintSoft: '#F6ECFC',
+    title: 'Never Blocks the UI',
+    tagline: 'Every activity runs on a worker thread',
+    story:
+      'Activities execute in a separate JavaScript runtime on their own OS thread. That means activity code can do ANYTHING — hash a file, resize an image, or just burn the CPU with raw math for five straight seconds — and this screen keeps scrolling at full frame rate. To feel what the old single-threaded world was like, the second button runs the exact same math directly on the UI thread: the whole app freezes until it finishes.',
+    tryIt: [
+      'Tap "Burn 5s on the Worker", then immediately scroll the deck and drag the Engine bar — everything stays smooth.',
+      'Open Jobs while it runs to watch the activity working in the background.',
+      'Now tap "Burn 3s on the UI Thread" and try to scroll. That freeze is what this branch removes.',
+    ],
+    codeTitle: 'blocking on purpose',
+    code: `const burnCpu = defineActivity({
+  name: 'demo.heavy.burn',
+  execute: async (a) => {
+    const start = Date.now();
+    let iterations = 0;
+    // No awaits. No yielding. Just math.
+    while (Date.now() - start < 5000) {
+      spinXorShift(100_000);
+      iterations += 100_000;
+    }
+    return { iterations };
+  },
+});
+
+// No config needed — ALL activities run
+// on the worker. The UI cannot be blocked.`,
+    workflows: ['demo.heavyCompute'],
+    actions: [
+      { id: 'thread-worker', label: 'Burn 5s on the Worker', run: s => s.queueHeavyCompute(5), variant: 'filled' },
+      {
+        id: 'thread-ui',
+        label: 'Burn 3s on the UI Thread',
+        run: async () => {
+          // The counter-demo: the same loop, run right here on the UI
+          // runtime. The app freezes — by design, to show the contrast.
+          const start = Date.now();
+          let x = 0x2545f491;
+          while (Date.now() - start < 3000) {
+            x ^= x << 13;
+            x ^= x >>> 17;
+            x ^= x << 5;
+          }
+          return x;
+        },
+        variant: 'gray',
+      },
+    ],
+  },
+  {
     id: 'offline',
     icon: '✈️',
     tint: '#FF9500',

@@ -21,6 +21,7 @@ import { WorkflowEngine } from '../../../../src/core/engine/WorkflowEngine';
 import { InMemoryStorage } from '../../../../src/storage/memory';
 import { MockClock, MockScheduler, MockEnvironment } from '../../../../src/core/mocks';
 import { defineActivity, defineWorkflow } from '../../../../src/core/definitions';
+import { createLoopbackDispatcher } from '../../../../src/workers/loopback';
 
 describe('WorkflowEngine - Dead Letter Redrive', () => {
   let storage: InMemoryStorage;
@@ -37,6 +38,7 @@ describe('WorkflowEngine - Dead Letter Redrive', () => {
 
   async function createEngine(onEvent?: (event: { type: string; [key: string]: unknown }) => void): Promise<WorkflowEngine> {
     return WorkflowEngine.create({
+      dispatcher: createLoopbackDispatcher(),
       storage,
       clock,
       scheduler,

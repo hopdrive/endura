@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "main": "index.ts",
   "dependencies": {
+    "@ammarahmed/react-native-workers": "1.0.0-alpha.2",
     "@gorhom/bottom-sheet": "^5.2.14",
     "endura": "file:../../endura-0.1.0.tgz",
     "expo": "~54.0.35",

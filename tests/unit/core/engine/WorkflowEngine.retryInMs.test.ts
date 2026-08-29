@@ -18,6 +18,7 @@ import { InMemoryStorage } from '../../../../src/storage/memory';
 import { MockClock, MockScheduler, MockEnvironment } from '../../../../src/core/mocks';
 import { defineActivity, defineWorkflow } from '../../../../src/core/definitions';
 import { afterDelay } from '../../../../src/core/conditions';
+import { createLoopbackDispatcher } from '../../../../src/workers/loopback';
 
 describe('WorkflowEngine - retryInMs and afterDelay (H6)', () => {
   let storage: InMemoryStorage;
@@ -33,7 +34,7 @@ describe('WorkflowEngine - retryInMs and afterDelay (H6)', () => {
   });
 
   async function createEngine(): Promise<WorkflowEngine> {
-    return WorkflowEngine.create({ storage, clock, scheduler, environment });
+    return WorkflowEngine.create({ dispatcher: createLoopbackDispatcher(), storage, clock, scheduler, environment });
   }
 
   it('honors the condition retryInMs when rescheduling a skipped task', async () => {

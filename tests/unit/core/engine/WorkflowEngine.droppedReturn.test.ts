@@ -10,6 +10,7 @@ import { WorkflowEngine } from '../../../../src/core/engine';
 import { InMemoryStorage } from '../../../../src/storage/memory';
 import { MockClock, MockScheduler, MockEnvironment } from '../../../../src/core/mocks';
 import { defineActivity, defineWorkflow } from '../../../../src/core/definitions';
+import { createLoopbackDispatcher } from '../../../../src/workers/loopback';
 
 describe('dropped non-object activity returns (L4)', () => {
   let engine: WorkflowEngine;
@@ -19,6 +20,7 @@ describe('dropped non-object activity returns (L4)', () => {
     warn = vi.fn();
     const clock = new MockClock(1000000);
     engine = await WorkflowEngine.create({
+      dispatcher: createLoopbackDispatcher(),
       storage: new InMemoryStorage(),
       clock,
       scheduler: new MockScheduler(clock),

@@ -8,6 +8,7 @@
 import { openDatabaseAsync, deleteDatabaseAsync } from 'expo-sqlite';
 import { SQLiteStorage, ExpoSqliteDriver } from 'endura/storage/sqlite';
 import { ExpoWorkflowClient } from 'endura/environmental/expo';
+import { WorkerLike, createLoopbackDispatcher } from 'endura/workers';
 import { HarnessPlatform } from './runner';
 
 export interface ParityClient extends ExpoWorkflowClient {
@@ -22,7 +23,11 @@ export interface ParityClient extends ExpoWorkflowClient {
 }
 
 export const expoPlatform: HarnessPlatform<ParityClient> = {
-  async createClient(dbName: string, online: () => boolean): Promise<ParityClient> {
+  async createClient(
+    dbName: string,
+    online: () => boolean,
+    options?: { worker?: WorkerLike }
+  ): Promise<ParityClient> {
     const driver = await ExpoSqliteDriver.create(dbName, openDatabaseAsync);
     const storage = new SQLiteStorage(driver);
     await storage.initialize();
@@ -35,6 +40,13 @@ export const expoPlatform: HarnessPlatform<ParityClient> = {
 
     const client = (await ExpoWorkflowClient.create({
       storage,
+      // The demo session passes the real activity worker. The parity
+      // scenarios define per-run workflows with closures over local
+      // test state, so they run on the loopback dispatcher instead —
+      // same message protocol, in-process.
+      ...(options?.worker
+        ? { worker: options.worker }
+        : { dispatcher: createLoopbackDispatcher() }),
       leaseDurationMs: 10000,
       logger: {
         debug: capture('debug'),

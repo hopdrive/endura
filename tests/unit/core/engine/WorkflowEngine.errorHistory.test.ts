@@ -17,6 +17,7 @@ import { WorkflowEngine } from '../../../../src/core/engine/WorkflowEngine';
 import { InMemoryStorage } from '../../../../src/storage/memory';
 import { MockClock, MockScheduler, MockEnvironment } from '../../../../src/core/mocks';
 import { defineActivity, defineWorkflow } from '../../../../src/core/definitions';
+import { createLoopbackDispatcher } from '../../../../src/workers/loopback';
 
 describe('WorkflowEngine - error history (M2)', () => {
   let storage: InMemoryStorage;
@@ -32,7 +33,7 @@ describe('WorkflowEngine - error history (M2)', () => {
   });
 
   async function createEngine(): Promise<WorkflowEngine> {
-    return WorkflowEngine.create({ storage, clock, scheduler, environment });
+    return WorkflowEngine.create({ dispatcher: createLoopbackDispatcher(), storage, clock, scheduler, environment });
   }
 
   it('accumulates failure entries in order instead of keeping only the last error', async () => {

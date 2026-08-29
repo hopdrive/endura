@@ -11,6 +11,7 @@ import { WorkflowEngine } from '../../../../src/core/engine';
 import { InMemoryStorage } from '../../../../src/storage/memory';
 import { MockClock, MockScheduler, MockEnvironment } from '../../../../src/core/mocks';
 import { defineActivity, defineWorkflow } from '../../../../src/core/definitions';
+import { createLoopbackDispatcher } from '../../../../src/workers/loopback';
 
 describe('calculateBackoffDelay jitter', () => {
   it('defaults to no jitter (pure exponential) for direct callers', () => {
@@ -40,6 +41,7 @@ describe('engine retry jitter', () => {
     const clock = new MockClock(1000000);
     const storage = new InMemoryStorage();
     const engine = await WorkflowEngine.create({
+      dispatcher: createLoopbackDispatcher(),
       storage,
       clock,
       scheduler: new MockScheduler(clock),

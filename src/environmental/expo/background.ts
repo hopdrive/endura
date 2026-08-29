@@ -29,11 +29,15 @@
  *   const storage = new SQLiteStorage(driver);
  *   await storage.initialize();
  *
+ *   // Same worker entry file the foreground app uses
+ *   const worker = new Worker('./workflows/endura.worker', { nativeModules: true });
  *   const result = await runBackgroundWorkflowTask({
  *     storage,
+ *     worker,
  *     workflows: [photoWorkflow, syncWorkflow],
  *     lifespan: 25000, // 25 seconds
  *   });
+ *   worker.terminate();
  *   return toBackgroundTaskResult(result);
  * });
  *
@@ -45,7 +49,8 @@
  * ```
  */
 
-import { Storage, Workflow } from '../../core/types';
+import { ActivityDispatcher, Storage, Workflow } from '../../core/types';
+import { WorkerLike } from '../../workers/protocol';
 import { ExpoWorkflowClient, ExpoWorkflowClientOptions } from './ExpoWorkflowClient';
 
 /**
@@ -96,6 +101,18 @@ export interface BackgroundTaskOptions {
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   workflows: Array<Workflow<any>>;
+
+  /**
+   * The worker that executes activities, created fresh inside the
+   * background task with react-native-workers (same worker entry file
+   * as the foreground app). The task owns its lifecycle — terminate it
+   * when the task ends. Exactly one of `worker` or `dispatcher` is
+   * required.
+   */
+  worker?: WorkerLike;
+
+  /** Pre-built dispatcher (tests, unusual runtimes). */
+  dispatcher?: ActivityDispatcher;
 
   /**
    * Maximum time to run in milliseconds.
@@ -167,6 +184,8 @@ export async function runBackgroundWorkflowTask(
     // Create the client
     const client = await ExpoWorkflowClient.create({
       storage: options.storage,
+      worker: options.worker,
+      dispatcher: options.dispatcher,
       environment: options.environment,
       onEvent: event => {
         if (event.type === 'activity:completed') {
