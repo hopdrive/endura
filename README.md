@@ -663,6 +663,12 @@ await client.start();                      // Begin processing activities (ExpoW
 await client.start({ lifespan: 25000 });   // Process for max 25 seconds (background mode)
 engine.stop();                             // Pause processing (works on both client.engine and engine)
 
+// Skip the rest of a runWhen wait when you know the condition just turned true,
+// e.g. on the offline-to-online edge. Moves pending tasks whose last skip gave
+// this reason to now (a failure backoff keeps its delay), shortens a skip that
+// a claim in flight is about to save, and wakes an idle run() loop.
+const woken = await engine.wakeSkipped({ reason: 'No network connection' });
+
 // Dead letter queue
 const deadLetters = await engine.getDeadLetters();
 const unacked = await engine.getUnacknowledgedDeadLetters();

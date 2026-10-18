@@ -71,6 +71,17 @@ export interface WorkflowExecution {
 /**
  * One recorded failure or skip in a task's history.
  */
+/**
+ * Which skipped tasks `WorkflowEngine.wakeSkipped` brings forward.
+ */
+export interface WakeSkippedFilter {
+  /**
+   * Only tasks whose most recent skip gave exactly this reason (the
+   * `reason` their runWhen returned). Omit to wake every skipped task.
+   */
+  reason?: string;
+}
+
 export interface TaskErrorHistoryEntry {
   /** When it happened (engine Clock, unix ms) */
   at: number;
@@ -562,6 +573,18 @@ export interface Storage {
    * longer active or is owned by a different engine.
    */
   renewLease(taskId: string, ownerId: string, leaseExpiresAt: number): Promise<boolean>;
+  /**
+   * Compare-and-set the time a pending task becomes due. Moves `scheduledFor`
+   * from `expectedScheduledFor` to `scheduledFor` only if the task is still
+   * pending and still scheduled for `expectedScheduledFor`; touches no other
+   * field. Returns false when another engine claimed or re-parked the task
+   * since it was read. Used by `WorkflowEngine.wakeSkipped`.
+   *
+   * Optional so custom storages written for 0.2 keep compiling. Without it
+   * the engine falls back to read-then-`saveActivityTask`, which is safe
+   * within one engine but not against a second engine on the same database.
+   */
+  rescheduleActivityTask?(taskId: string, expectedScheduledFor: number, scheduledFor: number): Promise<boolean>;
 
   // Dead Letter Queue
   saveDeadLetter(record: DeadLetterRecord): Promise<void>;

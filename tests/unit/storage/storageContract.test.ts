@@ -172,6 +172,36 @@ describe.each(backends)('storage contract (M4) — $name', ({ create }) => {
     });
   });
 
+  describe('rescheduleActivityTask (wake compare-and-set)', () => {
+    beforeEach(async () => {
+      await storage.saveExecution(execution());
+      await storage.saveActivityTask(
+        task({ scheduledFor: 40000, errorHistory: [{ at: 10000, kind: 'skip', message: 'offline' }] })
+      );
+    });
+
+    it('moves a parked pending task and touches nothing else', async () => {
+      const before = await storage.getActivityTask('task-1');
+      expect(await storage.rescheduleActivityTask!('task-1', 40000, 12000)).toBe(true);
+      expect(await storage.getActivityTask('task-1')).toEqual({ ...before, scheduledFor: 12000 });
+      expect(await storage.getPendingActivityTasks({ now: 12000 })).toHaveLength(1);
+    });
+
+    it('refuses a task another engine claimed after it was read', async () => {
+      await storage.saveActivityTask(task({ scheduledFor: 9000 }));
+      await storage.claimActivityTask('task-1', 9000, { ownerId: 'engine-B', leaseDurationMs: 1000 });
+      expect(await storage.rescheduleActivityTask!('task-1', 9000, 9500)).toBe(false);
+      expect((await storage.getActivityTask('task-1'))?.status).toBe('active');
+    });
+
+    it('refuses a task re-parked since it was read, and a missing task', async () => {
+      await storage.saveActivityTask(task({ scheduledFor: 70000 }));
+      expect(await storage.rescheduleActivityTask!('task-1', 40000, 12000)).toBe(false);
+      expect((await storage.getActivityTask('task-1'))?.scheduledFor).toBe(70000);
+      expect(await storage.rescheduleActivityTask!('missing', 40000, 12000)).toBe(false);
+    });
+  });
+
   describe('pending queue', () => {
     it('orders by priority DESC then createdAt ASC, respecting scheduledFor and limit', async () => {
       await storage.saveExecution(execution());

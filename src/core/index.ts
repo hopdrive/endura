@@ -13,6 +13,7 @@ export {
   WorkflowExecution,
   ActivityTask,
   TaskErrorHistoryEntry,
+  WakeSkippedFilter,
   DeadLetterRecord,
 
   // Activity types

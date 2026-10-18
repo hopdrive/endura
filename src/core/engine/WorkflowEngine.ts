@@ -28,6 +28,7 @@ import {
   RunConditionFn,
   isNonRetryableError,
   TaskErrorHistoryEntry,
+  WakeSkippedFilter,
   ExecutionQuery,
 } from '../types';
 import {
@@ -101,6 +102,14 @@ export class WorkflowEngine {
   // FIFO chain serializing this engine's storage-transactional segments
   // (see runExclusive).
   private opChain: Promise<unknown> = Promise.resolve();
+
+  // Claims this engine holds right now, by taskId. A wakeSkipped call
+  // records its filter on each, so a claim that evaluated runWhen before the
+  // wake and skips after it is saved due now (see wakeSkipped).
+  private claimsInFlight: Map<string, { wakes: Array<string | undefined> }> = new Map();
+
+  // Resolves run()'s current idle sleep early. Null while not sleeping.
+  private interruptIdleSleep: (() => void) | null = null;
 
   // Track active AbortControllers by runId for cancellation propagation
   private activeAbortControllers: Map<string, { abort: (reason?: unknown) => void }> = new Map();
@@ -597,9 +606,9 @@ export class WorkflowEngine {
           continue;
         }
 
-        // If no work was done, sleep briefly
+        // If no work was done, sleep briefly (wakeSkipped cuts this short)
         if (processed === 0) {
-          await this.scheduler.sleep(options?.tickInterval ?? 100);
+          await this.idleSleep(options?.tickInterval ?? 100);
         }
       }
     } finally {
@@ -607,6 +616,86 @@ export class WorkflowEngine {
       this.abortController = null;
       this.logger.info('Engine stopped');
     }
+  }
+
+  /**
+   * Sleep between idle ticks, returning early if wakeSkipped moved work
+   * forward in the meantime.
+   */
+  private idleSleep(ms: number): Promise<void> {
+    return new Promise((resolve) => {
+      const done = (): void => {
+        if (this.interruptIdleSleep === done) {
+          this.interruptIdleSleep = null;
+        }
+        resolve();
+      };
+      this.interruptIdleSleep = done;
+      this.scheduler.sleep(ms).then(done, done);
+    });
+  }
+
+  /**
+   * Bring skipped tasks forward so they are due now.
+   *
+   * A runWhen skip parks a task `retryInMs ?? 30s` ahead. Call this when you
+   * know the condition just became true (the device came back online, the
+   * charger was plugged in) to skip the rest of that wait. runWhen is still
+   * evaluated at the next claim, so a condition that has flipped back just
+   * parks the task again.
+   *
+   * Only tasks whose most recent history entry is a skip are moved, so a
+   * retry backoff after a real failure keeps its delay. With a `reason`, only
+   * skips that gave exactly that reason are moved. Nothing but the due time
+   * changes: no attempt is spent and no history entry is added.
+   *
+   * It also covers a claim in flight in this engine. If the engine already
+   * claimed a matching task and read the condition before it flipped, the
+   * skip it is about to save is due now instead of `retryInMs` out. And if
+   * `run()` is idling between ticks, the idle sleep ends early so the loop
+   * claims the woken tasks at once.
+   *
+   * Safe against another engine on the same storage when the storage
+   * implements `rescheduleActivityTask` (both built-in storages do).
+   *
+   * @returns how many parked tasks were moved. Claims in flight that the
+   *   wake shortens are not counted.
+   */
+  async wakeSkipped(filter: WakeSkippedFilter = {}): Promise<number> {
+    const { reason } = filter;
+
+    // Synchronously, before anything awaits: any claim now in flight sees
+    // this wake when it saves its skip.
+    for (const claim of this.claimsInFlight.values()) {
+      claim.wakes.push(reason);
+    }
+
+    // Under the operation lock, so it orders against this engine's claims
+    // and skip saves. A skip saved before this runs is found here; one saved
+    // after it saw the mark above.
+    const woken = await this.runExclusive(async () => {
+      const now = this.clock.now();
+      const pending = await this.storage.getActivityTasksByStatus('pending');
+      let count = 0;
+      for (const task of pending) {
+        if (task.scheduledFor === undefined || task.scheduledFor <= now) continue;
+        const last = task.errorHistory?.[task.errorHistory.length - 1];
+        if (!last || last.kind !== 'skip') continue;
+        if (reason !== undefined && last.message !== reason) continue;
+
+        const moved = this.storage.rescheduleActivityTask
+          ? await this.storage.rescheduleActivityTask(task.taskId, task.scheduledFor, now)
+          : (await this.storage.saveActivityTask({ ...task, scheduledFor: now }), true);
+        if (moved) count++;
+      }
+      return count;
+    });
+
+    if (woken > 0) {
+      this.logger.debug('Woke skipped tasks', { count: woken, reason });
+    }
+    this.interruptIdleSleep?.();
+    return woken;
   }
 
   /**
@@ -686,6 +775,23 @@ export class WorkflowEngine {
    * Process a single task. Returns true if the task was processed.
    */
   private async processTask(task: ActivityTask): Promise<boolean> {
+    // Registered before the claim so no wake can fall between the claim and
+    // the record (see wakeSkipped).
+    const inFlight = { wakes: [] as Array<string | undefined> };
+    this.claimsInFlight.set(task.taskId, inFlight);
+    try {
+      return await this.claimAndProcess(task, inFlight);
+    } finally {
+      if (this.claimsInFlight.get(task.taskId) === inFlight) {
+        this.claimsInFlight.delete(task.taskId);
+      }
+    }
+  }
+
+  private async claimAndProcess(
+    task: ActivityTask,
+    inFlight: { wakes: Array<string | undefined> }
+  ): Promise<boolean> {
     const now = this.clock.now();
 
     // Try to claim the task (the claim opens its own transaction — take
@@ -725,7 +831,8 @@ export class WorkflowEngine {
       await this.handleTaskSkipped(
         claimed,
         conditionResult.reason ?? 'Condition not met',
-        conditionResult.retryInMs
+        conditionResult.retryInMs,
+        inFlight
       );
       return true;
     }
@@ -1386,37 +1493,54 @@ export class WorkflowEngine {
   /**
    * Handle task skipped due to runWhen condition.
    */
-  private async handleTaskSkipped(task: ActivityTask, reason: string, retryInMs?: number): Promise<void> {
-    const now = this.clock.now();
+  private async handleTaskSkipped(
+    task: ActivityTask,
+    reason: string,
+    retryInMs?: number,
+    inFlight?: { wakes: Array<string | undefined> }
+  ): Promise<void> {
+    // The save runs under the operation lock so it orders against
+    // wakeSkipped's scan: either the scan runs after and finds this row, or
+    // the wake was already recorded on inFlight and the row is saved due now.
+    const saved = await this.runExclusive(async () => {
+      const now = this.clock.now();
 
-    // Sticky terminal states: don't resurrect task rows for an
-    // execution that left 'running' while this claim was in flight.
-    const execution = await this.storage.getExecution(task.runId);
-    if (!execution || execution.status !== 'running') {
-      this.logger.debug('Not rescheduling skipped task for non-running execution', {
-        taskId: task.taskId,
-        runId: task.runId,
-        status: execution?.status ?? 'missing',
-      });
+      // Sticky terminal states: don't resurrect task rows for an
+      // execution that left 'running' while this claim was in flight.
+      const execution = await this.storage.getExecution(task.runId);
+      if (!execution || execution.status !== 'running') {
+        this.logger.debug('Not rescheduling skipped task for non-running execution', {
+          taskId: task.taskId,
+          runId: task.runId,
+          status: execution?.status ?? 'missing',
+        });
+        return null;
+      }
+
+      // Reschedule at the condition's retryInMs hint, defaulting to 30s,
+      // unless a matching wake arrived while this claim was in flight.
+      const woken = inFlight?.wakes.some((w) => w === undefined || w === reason) ?? false;
+      const delay = woken ? 0 : (retryInMs ?? DEFAULT_SKIP_RESCHEDULE_DELAY);
+      const skippedTask: ActivityTask = {
+        ...task,
+        status: 'pending',
+        scheduledFor: now + delay,
+        lastAttemptAt: now,
+        errorHistory: appendErrorHistory(task.errorHistory, { at: now, kind: 'skip', message: reason }),
+        ownerId: undefined,
+        leaseExpiresAt: undefined,
+      };
+      // Decrement attempts since this wasn't a real failure
+      skippedTask.attempts = Math.max(0, skippedTask.attempts - 1);
+      await this.storage.saveActivityTask(skippedTask);
+      return { now };
+    });
+    if (!saved) {
       return;
     }
+    const { now } = saved;
 
     const activity = this.activities.get(task.activityName);
-
-    // Reschedule at the condition's retryInMs hint, defaulting to 30s
-    const delay = retryInMs ?? DEFAULT_SKIP_RESCHEDULE_DELAY;
-    const skippedTask: ActivityTask = {
-      ...task,
-      status: 'pending',
-      scheduledFor: now + delay,
-      lastAttemptAt: now,
-      errorHistory: appendErrorHistory(task.errorHistory, { at: now, kind: 'skip', message: reason }),
-      ownerId: undefined,
-      leaseExpiresAt: undefined,
-    };
-    // Decrement attempts since this wasn't a real failure
-    skippedTask.attempts = Math.max(0, skippedTask.attempts - 1);
-    await this.storage.saveActivityTask(skippedTask);
 
     // Call onSkipped callback
     if (activity?.options?.onSkipped) {
