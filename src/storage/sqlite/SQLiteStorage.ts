@@ -589,6 +589,22 @@ export class SQLiteStorage implements Storage {
     });
   }
 
+  async rescheduleActivityTask(taskId: string, expectedScheduledFor: number, scheduledFor: number): Promise<boolean> {
+    // Same compare-and-set shape as the claim: a task another engine claimed
+    // or re-parked since the caller read it shows up as changes === 0.
+    const result = await this.driver.execute(
+      `UPDATE activity_tasks
+       SET scheduled_for = ?
+       WHERE task_id = ? AND status = 'pending' AND scheduled_for = ?`,
+      [scheduledFor, taskId, expectedScheduledFor]
+    );
+    const changed = (result.changes ?? 0) > 0;
+    if (changed) {
+      this.notifySubscribers({ type: 'task', operation: 'update', id: taskId });
+    }
+    return changed;
+  }
+
   async renewLease(taskId: string, ownerId: string, leaseExpiresAt: number): Promise<boolean> {
     const result = await this.driver.execute(
       `UPDATE activity_tasks

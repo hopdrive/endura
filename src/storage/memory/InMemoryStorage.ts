@@ -140,6 +140,16 @@ export class InMemoryStorage implements Storage {
     });
   }
 
+  async rescheduleActivityTask(taskId: string, expectedScheduledFor: number, scheduledFor: number): Promise<boolean> {
+    const task = this.tasks.get(taskId);
+    if (!task || task.status !== 'pending' || task.scheduledFor !== expectedScheduledFor) {
+      return false;
+    }
+    this.tasks.set(taskId, { ...task, scheduledFor });
+    this.notifySubscribers({ type: 'task', operation: 'update', id: taskId });
+    return true;
+  }
+
   async getActivityTask(taskId: string): Promise<ActivityTask | null> {
     const task = this.tasks.get(taskId);
     return task ? { ...task } : null;
