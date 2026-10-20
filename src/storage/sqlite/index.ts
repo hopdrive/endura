@@ -3,6 +3,7 @@
  */
 
 export { SQLiteStorage } from './SQLiteStorage';
+export type { SQLiteStorageOptions } from './SQLiteStorage';
 
 // Export driver types for those who need to create custom drivers
 export type { SQLiteDriver, SQLiteDriverFactory, SQLiteRow, SQLiteResult } from './internal/SQLiteDriver';

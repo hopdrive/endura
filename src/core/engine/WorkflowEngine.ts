@@ -30,9 +30,11 @@ import {
   TaskErrorHistoryEntry,
   WakeSkippedFilter,
   ExecutionQuery,
+  NoRandomSourceError,
 } from '../types';
 import {
   generateId,
+  hasRandomSource,
   mergeState,
   calculateBackoffDelay,
   silentLogger,
@@ -94,7 +96,10 @@ export class WorkflowEngine {
 
   // Identifies this engine instance for task leases; every engine (e.g.
   // foreground app vs background wake) gets its own.
-  private ownerId: string = generateId();
+  private ownerId: string;
+  // Id source for this engine (config.generateId, else the module-level
+  // generateId). See WorkflowEngineConfig.generateId.
+  private generateId: () => string;
   private leaseDurationMs: number;
   private stateSizeWarnBytes: number;
   private random: () => number;
@@ -125,12 +130,19 @@ export class WorkflowEngine {
     this.leaseDurationMs = config.leaseDurationMs ?? DEFAULT_LEASE_MS;
     this.stateSizeWarnBytes = config.stateSizeWarnBytes ?? DEFAULT_STATE_SIZE_WARN_BYTES;
     this.random = config.random ?? Math.random;
+    this.generateId = config.generateId ?? generateId;
+    this.ownerId = this.generateId();
   }
 
   /**
    * Create and initialize a WorkflowEngine instance.
    */
   static async create(config: WorkflowEngineConfig): Promise<WorkflowEngine> {
+    // Fail with a named error before building anything, instead of a
+    // generic Error from the ownerId mint in the constructor.
+    if (!config.generateId && !hasRandomSource()) {
+      throw new NoRandomSourceError();
+    }
     const engine = new WorkflowEngine(config);
     await engine.initialize();
     return engine;
@@ -354,7 +366,7 @@ export class WorkflowEngine {
     }
 
     const now = this.clock.now();
-    const runId = generateId();
+    const runId = this.generateId();
 
     const firstActivity = workflow.activities[0];
     if (!firstActivity) {
@@ -454,7 +466,7 @@ export class WorkflowEngine {
     const opts = activity.options ?? {};
 
     const task: ActivityTask = {
-      taskId: generateId(),
+      taskId: this.generateId(),
       runId: execution.runId,
       activityName: activity.name,
       status: 'pending',
@@ -1367,7 +1379,7 @@ export class WorkflowEngine {
 
       // Move to dead letter queue
       const deadLetter: DeadLetterRecord = {
-        id: generateId(),
+        id: this.generateId(),
         runId: task.runId,
         taskId: task.taskId,
         activityName: task.activityName,

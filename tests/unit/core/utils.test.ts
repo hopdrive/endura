@@ -9,7 +9,8 @@
  */
 
 import { webcrypto } from 'node:crypto';
-import { generateId, setIdGenerator } from '../../../src/core/utils';
+import { generateId, hasRandomSource, setIdGenerator } from '../../../src/core/utils';
+import { NoRandomSourceError } from '../../../src/core/types';
 
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
@@ -43,5 +44,15 @@ describe('generateId (C6)', () => {
     vi.stubGlobal('crypto', undefined);
 
     expect(() => generateId()).toThrow(/expo-crypto/);
+  });
+
+  it('throws NoRandomSourceError, and hasRandomSource reports false, with no source', () => {
+    vi.stubGlobal('crypto', undefined);
+
+    expect(hasRandomSource()).toBe(false);
+    expect(() => generateId()).toThrow(NoRandomSourceError);
+
+    setIdGenerator(() => 'x');
+    expect(hasRandomSource()).toBe(true);
   });
 });

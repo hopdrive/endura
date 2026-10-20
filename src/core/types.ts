@@ -466,6 +466,16 @@ export interface WorkflowEngineConfig {
    * @default Math.random
    */
   random?: () => number;
+  /**
+   * Id source for this engine: its lease owner id, run ids, task ids and
+   * dead-letter ids. Hermes has no `globalThis.crypto`, so a React Native
+   * app should pass one, for example `() => Crypto.randomUUID()` from
+   * expo-crypto. Takes precedence over `setIdGenerator()`. Storage adapters
+   * that mint their own ids take a generator separately
+   * (`new SQLiteStorage(driver, { generateId })`).
+   * @default the module-level generateId (setIdGenerator override, then globalThis.crypto)
+   */
+  generateId?: () => string;
 }
 
 // ============================================================================
@@ -645,6 +655,26 @@ export class ExecutionNotFoundError extends Error {
   constructor(public runId: string) {
     super(`Execution '${runId}' not found`);
     this.name = 'ExecutionNotFoundError';
+  }
+}
+
+/**
+ * Thrown when endura needs to mint an id and has no random source: no
+ * per-engine `generateId`, no `setIdGenerator()` override, and no
+ * `globalThis.crypto`. Hermes ships without `globalThis.crypto`, so a React
+ * Native app that builds `WorkflowEngine` directly hits this unless it
+ * supplies one. `WorkflowEngine.create` checks up front and throws this
+ * before it reads storage.
+ */
+export class NoRandomSourceError extends Error {
+  constructor() {
+    super(
+      'No secure random source available. Pass `generateId` in the WorkflowEngineConfig ' +
+        '(for example `generateId: () => Crypto.randomUUID()` from expo-crypto), or call ' +
+        'setIdGenerator() once at startup. On React Native/Hermes there is no globalThis.crypto; ' +
+        'install expo-crypto (ExpoWorkflowClient wires it automatically).'
+    );
+    this.name = 'NoRandomSourceError';
   }
 }
 

@@ -54,6 +54,7 @@ export {
   ExecutionNotFoundError,
   ActivityTimeoutError,
   NonRetryableError,
+  NoRandomSourceError,
   isNonRetryableError,
 } from './types';
 
@@ -77,6 +78,7 @@ export { RealClock, RealScheduler, StubEnvironment } from './defaults';
 export {
   generateId,
   setIdGenerator,
+  hasRandomSource,
   calculateBackoffDelay,
   JitterMode,
   mergeState,

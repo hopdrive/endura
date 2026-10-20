@@ -19,15 +19,30 @@ import { getSchemaStatements, MIGRATIONS, SCHEMA_VERSION } from './internal/sche
 import { generateId } from '../../core/utils';
 
 /**
+ * Options for SQLiteStorage.
+ */
+export interface SQLiteStorageOptions {
+  /**
+   * Id source for ids this storage mints itself (the dead letter written
+   * when a corrupt task row is quarantined). Pass the same generator you
+   * give WorkflowEngineConfig.generateId.
+   * @default the module-level generateId (setIdGenerator override, then globalThis.crypto)
+   */
+  generateId?: () => string;
+}
+
+/**
  * SQLite-based storage adapter.
  */
 export class SQLiteStorage implements Storage {
   private driver: SQLiteDriver;
+  private generateId: () => string;
   private subscribers: Set<(change: StorageChange) => void> = new Set();
   private initialized = false;
 
-  constructor(driver: SQLiteDriver) {
+  constructor(driver: SQLiteDriver, options: SQLiteStorageOptions = {}) {
     this.driver = driver;
+    this.generateId = options.generateId ?? generateId;
   }
 
   /**
@@ -535,7 +550,7 @@ export class SQLiteStorage implements Storage {
         ['Corrupt task payload quarantined (unparseable JSON)', now, taskId]
       );
       await this.saveDeadLetter({
-        id: generateId(),
+        id: this.generateId(),
         runId,
         taskId,
         activityName: row['activity_name'] as string,
