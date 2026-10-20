@@ -1440,8 +1440,9 @@ await client.start({ lifespan: 25000 });  // Process for max 25 seconds
 ```
 
 The client will:
-- Stop 500ms before the deadline to allow graceful shutdown
-- Continue processing activities until the deadline is reached
+- Stop claiming tasks 500ms before the deadline to allow graceful shutdown
+- Check the deadline before each task, so a batch of pending tasks cannot run past it. A task already running finishes; the rest stay pending for the next wake
+- Treat a lifespan of 0 or less as already spent and run no task. Omit `lifespan` for no limit
 
 ---
 

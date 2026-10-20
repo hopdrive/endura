@@ -91,6 +91,12 @@ export class WorkflowEngine {
   private activities: Map<string, Activity> = new Map();
   private isRunning = false;
   private abortController: AbortController | null = null;
+  /**
+   * When run() must stop claiming tasks (its lifespan deadline less the
+   * safety buffer), or null for no deadline. tick() reads it before each
+   * task so one batch cannot run past a background window.
+   */
+  private stopClaimingAt: number | null = null;
   private hasReconciled = false;
   private nextLeaseRecoveryAt = 0;
 
@@ -593,15 +599,17 @@ export class WorkflowEngine {
 
     this.isRunning = true;
     this.abortController = new AbortController();
-    const deadline = options?.lifespan ? this.clock.now() + options.lifespan : null;
+    // A lifespan of 0 or less is a window already spent, not "no limit":
+    // a caller passing its remaining budget must never get an unbounded run.
     const safetyBuffer = 500;
+    this.stopClaimingAt =
+      options?.lifespan != null ? this.clock.now() + options.lifespan - safetyBuffer : null;
 
     this.logger.info('Engine started', { lifespan: options?.lifespan });
 
     try {
       while (this.isRunning && !this.abortController.signal.aborted) {
-        // Check deadline
-        if (deadline && this.clock.now() >= deadline - safetyBuffer) {
+        if (this.isPastDeadline()) {
           this.logger.info('Approaching deadline, stopping gracefully');
           break;
         }
@@ -626,8 +634,13 @@ export class WorkflowEngine {
     } finally {
       this.isRunning = false;
       this.abortController = null;
+      this.stopClaimingAt = null;
       this.logger.info('Engine stopped');
     }
+  }
+
+  private isPastDeadline(): boolean {
+    return this.stopClaimingAt !== null && this.clock.now() >= this.stopClaimingAt;
   }
 
   /**
@@ -764,6 +777,12 @@ export class WorkflowEngine {
     for (const task of pendingTasks) {
       // Check if we should stop
       if (!this.isRunning && this.abortController?.signal.aborted) {
+        break;
+      }
+      // A task already running is left to finish; the next one waits for
+      // the next wake rather than starting past run()'s deadline.
+      if (this.isPastDeadline()) {
+        this.logger.info('Deadline reached mid-tick, leaving remaining tasks pending');
         break;
       }
 
