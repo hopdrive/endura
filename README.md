@@ -608,15 +608,21 @@ For non-Expo apps or custom configurations, you can use the engine directly:
 import { WorkflowEngine } from 'endura';
 import { SQLiteStorage, ExpoSqliteDriver } from 'endura/storage/sqlite';
 import { openDatabaseAsync } from 'expo-sqlite';
+import * as Crypto from 'expo-crypto';
+
+// Hermes has no globalThis.crypto, so give the engine and storage an id
+// source. Without one, WorkflowEngine.create throws NoRandomSourceError.
+const generateId = () => Crypto.randomUUID();
 
 // Create SQLite storage
 const driver = await ExpoSqliteDriver.create('workflow.db', openDatabaseAsync);
-const storage = new SQLiteStorage(driver);
+const storage = new SQLiteStorage(driver, { generateId });
 await storage.initialize();
 
 // Initialize the engine
 const engine = await WorkflowEngine.create({
   storage,
+  generateId,
   // ... other options
 });
 

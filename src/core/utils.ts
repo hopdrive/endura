@@ -2,6 +2,8 @@
  * Utility functions for the workflow engine.
  */
 
+import { NoRandomSourceError } from './types';
+
 type IdGenerator = () => string;
 
 let idGenerator: IdGenerator | null = null;
@@ -21,12 +23,24 @@ interface CryptoLike {
 }
 
 /**
+ * True when generateId() can mint an id: a setIdGenerator() override, or
+ * globalThis.crypto with randomUUID or getRandomValues.
+ */
+export function hasRandomSource(): boolean {
+  if (idGenerator) {
+    return true;
+  }
+  const cryptoObj = (globalThis as { crypto?: CryptoLike }).crypto;
+  return typeof cryptoObj?.randomUUID === 'function' || typeof cryptoObj?.getRandomValues === 'function';
+}
+
+/**
  * Generate a unique identifier (UUID v4).
  *
  * Resolution order: injected generator (expo-crypto on device) →
  * crypto.randomUUID (Node, browsers) → crypto.getRandomValues. Throws a
  * clear error instead of crashing deep inside a dependency when no
- * secure random source exists.
+ * secure random source exists (NoRandomSourceError).
  */
 export function generateId(): string {
   if (idGenerator) {
@@ -45,10 +59,7 @@ export function generateId(): string {
     return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
   }
 
-  throw new Error(
-    'No secure random source available. On React Native/Hermes, install expo-crypto ' +
-      '(the endura Expo integration wires it automatically) or call setIdGenerator().'
-  );
+  throw new NoRandomSourceError();
 }
 
 /**

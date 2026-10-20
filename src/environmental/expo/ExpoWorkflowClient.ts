@@ -16,17 +16,22 @@ import { ExpoEnvironment, ExpoEnvironmentOptions } from './ExpoEnvironment';
  * crypto.randomUUID nor crypto.getRandomValues, so without this the
  * engine cannot mint IDs on-device.
  */
-function wireExpoCrypto(): void {
+function wireExpoCrypto(): (() => string) | undefined {
   try {
     // Dynamic require: expo-crypto is an optional peer dependency
     const cryptoModule = require('expo-crypto') as { randomUUID?: () => string };
     if (typeof cryptoModule.randomUUID === 'function') {
-      setIdGenerator(() => cryptoModule.randomUUID!());
+      const fn = () => cryptoModule.randomUUID!();
+      // Still set the module-level fallback so a SQLiteStorage built
+      // without its own generateId can mint ids too.
+      setIdGenerator(fn);
+      return fn;
     }
   } catch {
     // expo-crypto not installed — generateId falls back to global crypto
-    // and throws a descriptive error if none exists.
+    // and throws NoRandomSourceError if none exists.
   }
+  return undefined;
 }
 
 /**
@@ -82,6 +87,12 @@ export interface ExpoWorkflowClientOptions {
    * @default 65536
    */
   stateSizeWarnBytes?: number;
+
+  /**
+   * Id source for the engine. See WorkflowEngineConfig.generateId.
+   * @default expo-crypto's randomUUID when installed
+   */
+  generateId?: () => string;
 }
 
 /**
@@ -137,7 +148,7 @@ export class ExpoWorkflowClient {
    * ```
    */
   static async create(options: ExpoWorkflowClientOptions): Promise<ExpoWorkflowClient> {
-    wireExpoCrypto();
+    const expoGenerateId = wireExpoCrypto();
 
     const storage = options.storage;
 
@@ -156,6 +167,7 @@ export class ExpoWorkflowClient {
       leaseDurationMs: options.leaseDurationMs,
       logger: options.logger,
       stateSizeWarnBytes: options.stateSizeWarnBytes,
+      generateId: options.generateId ?? expoGenerateId,
     });
 
     return new ExpoWorkflowClient(engine, storage, environment);

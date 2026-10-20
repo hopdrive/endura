@@ -48,4 +48,23 @@ describe('ExpoWorkflowClient config passthrough', () => {
       await client.close();
     }
   });
+
+  it('forwards generateId to the engine', async () => {
+    let n = 0;
+    const client = await ExpoWorkflowClient.create({
+      storage: new InMemoryStorage(),
+      generateId: () => `expo-${++n}`,
+    });
+
+    try {
+      const wf = defineWorkflow({
+        name: 'ids',
+        activities: [defineActivity({ name: 'noop', execute: async () => ({}) })],
+      });
+      const execution = await client.engine.start(wf, { input: {} });
+      expect(execution.runId).toMatch(/^expo-\d+$/);
+    } finally {
+      await client.close();
+    }
+  });
 });
