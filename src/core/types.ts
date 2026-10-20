@@ -364,7 +364,11 @@ export interface StartWorkflowOptions<TInput = Record<string, unknown>> {
  * Options for running the engine tick loop.
  */
 export interface TickOptions {
-  /** Max time to run in ms (for background mode) */
+  /**
+   * Max time to run in ms (for background mode). The engine stops claiming
+   * tasks 500ms before it runs out, checking before each task. 0 or less
+   * means the time is already spent, so no task runs. Omit it for no limit.
+   */
   lifespan?: number;
   /** Idle sleep between ticks when no work was processed (default 100ms) */
   tickInterval?: number;
