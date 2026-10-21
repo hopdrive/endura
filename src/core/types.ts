@@ -339,8 +339,38 @@ export interface Workflow<TInput = Record<string, unknown>> extends WorkflowCall
    * keeps mixed-version resumes safe.
    */
   version?: string;
+  /**
+   * Give up on an execution that is still running this long after it
+   * started. Its next task is dead-lettered instead of run, with a
+   * WorkflowExpiredError (nonRetryable), and the execution fails.
+   *
+   * For work whose value decays: an offer that lapses in minutes, a
+   * diagnostic that only helps near the moment it was asked for. Leave it
+   * unset for anything that must reach the server however late, which is
+   * the default.
+   *
+   * The engine checks when it claims a task and once per engine instance
+   * on its first tick, so a task parked by runWhen or a retry backoff
+   * expires at launch rather than whenever its next attempt comes due. A
+   * task already active is left to finish.
+   */
+  expiry?: WorkflowExpiry;
   /** @internal Type brand for input type inference */
   readonly _inputType?: TInput;
+}
+
+/**
+ * When a workflow's executions stop being worth running. See Workflow.expiry.
+ */
+export interface WorkflowExpiry {
+  /** Age in ms, measured from the execution's createdAt. Strictly older expires. */
+  afterMs: number;
+  /**
+   * Message for the dead letter and the failed execution. Defaults to a
+   * sentence naming the workflow and both ages. Pass your own when a UI
+   * reads the dead letter's error, for example an i18n key.
+   */
+  message?: string;
 }
 
 // ============================================================================
@@ -705,6 +735,29 @@ export class NonRetryableError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'NonRetryableError';
+  }
+}
+
+/**
+ * Why an expired execution's task was dead-lettered (see Workflow.expiry).
+ * Non-retryable, so the dead letter is flagged as a refusal rather than an
+ * exhausted retry budget: retrying cannot make old work young again.
+ */
+export class WorkflowExpiredError extends NonRetryableError {
+  readonly expired = true;
+  /** How old the execution was when it expired, in ms */
+  readonly ageMs: number;
+  /** The workflow's expiry.afterMs */
+  readonly afterMs: number;
+
+  constructor(workflowName: string, ageMs: number, afterMs: number, message?: string) {
+    super(
+      message ??
+        `Workflow '${workflowName}' expired: still unfinished ${ageMs}ms after it started (limit ${afterMs}ms)`
+    );
+    this.name = 'WorkflowExpiredError';
+    this.ageMs = ageMs;
+    this.afterMs = afterMs;
   }
 }
 

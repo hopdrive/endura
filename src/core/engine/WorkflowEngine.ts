@@ -31,6 +31,7 @@ import {
   WakeSkippedFilter,
   ExecutionQuery,
   NoRandomSourceError,
+  WorkflowExpiredError,
 } from '../types';
 import {
   generateId,
@@ -42,6 +43,7 @@ import {
   approxJsonBytes,
 } from '../utils';
 import { conditions } from '../conditions';
+import { assertValidExpiry } from '../definitions';
 
 // Default activity options
 const DEFAULT_TIMEOUT = 25000;
@@ -318,6 +320,7 @@ export class WorkflowEngine {
    * Register a workflow definition with the engine.
    */
   registerWorkflow(workflow: Workflow): void {
+    assertValidExpiry(workflow.name, workflow.expiry);
     if (this.workflows.has(workflow.name)) {
       this.logger.warn('Workflow already registered, overwriting', { name: workflow.name });
     }
@@ -748,6 +751,13 @@ export class WorkflowEngine {
       } catch (err) {
         this.logger.error('Reconciliation failed', { error: String(err) });
       }
+      // After the reconcile, which may have just scheduled a stranded
+      // execution's frontier task: that task is one this pass can expire.
+      try {
+        await this.expireStaleExecutions();
+      } catch (err) {
+        this.logger.error('Expiry sweep failed', { error: String(err) });
+      }
     }
 
     const now = this.clock.now();
@@ -835,6 +845,16 @@ export class WorkflowEngine {
     );
     if (!claimed) {
       return false; // Already claimed or no longer pending
+    }
+
+    // Ahead of the held check and runWhen: an expired execution is given
+    // up on whether or not this build registers the activity and whether
+    // or not its condition holds. Waiting for the network to come back
+    // before deciding is exactly how a stale send would go out.
+    const expired = await this.expiryFor(claimed, now);
+    if (expired) {
+      await this.handleTaskPermanentFailure(claimed, expired);
+      return true;
     }
 
     const activity = this.activities.get(task.activityName);
@@ -1471,6 +1491,81 @@ export class WorkflowEngine {
       activityName: task.activityName,
       error: error.message,
     });
+  }
+
+  /**
+   * The error to dead-letter a claimed task with, when its execution has
+   * outlived its workflow's expiry; null otherwise. Reads the execution
+   * only when some registered workflow sets an expiry, so engines that use
+   * none pay nothing per claim.
+   */
+  private async expiryFor(task: ActivityTask, now: number): Promise<WorkflowExpiredError | null> {
+    if (!this.hasExpiringWorkflow()) return null;
+    const execution = await this.storage.getExecution(task.runId);
+    if (!execution || execution.status !== 'running') return null;
+    const expiry = this.workflows.get(execution.workflowName)?.expiry;
+    if (!expiry) return null;
+    const ageMs = now - execution.createdAt;
+    if (ageMs <= expiry.afterMs) return null;
+    return new WorkflowExpiredError(execution.workflowName, ageMs, expiry.afterMs, expiry.message);
+  }
+
+  private hasExpiringWorkflow(): boolean {
+    for (const workflow of this.workflows.values()) {
+      if (workflow.expiry) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Dead-letter the waiting task of every running execution that has
+   * outlived its workflow's expiry, without waiting for the task to come
+   * due. A task parked by runWhen (offline) or by a retry backoff would
+   * otherwise sit in the queue until its next attempt, which is the
+   * moment it must not run.
+   *
+   * The first tick of every engine runs this, so a launch catches what
+   * expired while the app was closed. Call it yourself to sweep at another
+   * moment. Active tasks are left to finish: their attempt is already in
+   * flight and cannot be recalled.
+   *
+   * @returns how many executions it expired.
+   */
+  async expireStaleExecutions(): Promise<number> {
+    if (!this.hasExpiringWorkflow()) return 0;
+    let expired = 0;
+    for (const workflow of this.workflows.values()) {
+      if (!workflow.expiry) continue;
+      const now = this.clock.now();
+      const running = await this.storage.getExecutions({
+        status: 'running',
+        workflowName: workflow.name,
+        limit: Number.MAX_SAFE_INTEGER,
+      });
+      for (const execution of running) {
+        if (now - execution.createdAt <= workflow.expiry.afterMs) continue;
+        const tasks = await this.storage.getActivityTasksForExecution(execution.runId);
+        for (const task of tasks) {
+          if (task.status !== 'pending') continue;
+          // Bring it due under the same compare-and-set wakeSkipped uses,
+          // then take the ordinary claim path, which sees the expiry. A
+          // task another engine claimed in between is that engine's.
+          if (task.scheduledFor !== undefined && task.scheduledFor > now) {
+            const moved = await this.runExclusive(async () =>
+              this.storage.rescheduleActivityTask
+                ? this.storage.rescheduleActivityTask(task.taskId, task.scheduledFor!, now)
+                : (await this.storage.saveActivityTask({ ...task, scheduledFor: now }), true)
+            );
+            if (!moved) continue;
+          }
+          if (await this.processTask({ ...task, scheduledFor: now })) expired++;
+        }
+      }
+    }
+    if (expired > 0) {
+      this.logger.info('Expired stale executions', { count: expired });
+    }
+    return expired;
   }
 
   /**

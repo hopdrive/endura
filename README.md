@@ -714,6 +714,22 @@ interface PhotoWorkflowInput {
 }
 ```
 
+#### Expiry for work that goes stale
+
+Some work is worthless once it is old. An offer lapses in minutes; a diagnostic upload only helps near the moment someone asked for it. Set `expiry` and the engine gives up on an execution once it is older than `afterMs`, measured from when it started:
+
+```typescript
+export const sendDiagnostics = defineWorkflow({
+  name: 'sendDiagnostics',
+  activities: [uploadArchive],
+  expiry: { afterMs: 24 * 60 * 60 * 1000, message: 'diagnostics.expired' },
+});
+```
+
+An expired execution is never deleted. Its waiting task goes to the dead letter queue with a `WorkflowExpiredError` (non-retryable, so `nonRetryable: true` on the record), the execution is marked `failed`, and `onFailed` runs. The engine checks when it claims a task, ahead of `runWhen`, so an offline phone expires the task instead of parking it again. It also sweeps on each engine's first tick, so work that aged while the app was closed expires at launch rather than when its next retry comes due. `engine.expireStaleExecutions()` runs the same sweep on demand. A task that is already active is left to finish.
+
+Workflows without `expiry` never expire. Leave it off anything that has to reach the server however late it is.
+
 ### defineActivity
 
 Create an activity definition:
