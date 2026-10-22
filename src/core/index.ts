@@ -30,6 +30,7 @@ export {
   // Workflow types
   WorkflowCallbacks,
   Workflow,
+  WorkflowExpiry,
 
   // Engine types
   StartWorkflowOptions,
@@ -54,6 +55,7 @@ export {
   ExecutionNotFoundError,
   ActivityTimeoutError,
   NonRetryableError,
+  WorkflowExpiredError,
   NoRandomSourceError,
   isNonRetryableError,
 } from './types';
