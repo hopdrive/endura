@@ -184,3 +184,85 @@ describe('crash-window fault injection (missing test #3)', () => {
     await second.storage.close();
   });
 });
+
+describe('kill mid-handler after the server call went out', () => {
+  /**
+   * The app dies while a handler is running and its request has already
+   * reached the server, so the side effect happened but done was never
+   * written. On relaunch the step runs again and the server sees the call
+   * twice. That is the at-least-once contract, and the reason handlers
+   * must be idempotent. Nothing is lost.
+   */
+  it('re-runs the step on relaunch, so the side effect is seen twice and the workflow completes', async () => {
+    const serverCalls: string[] = [];
+    let sendAttempts = 0;
+    const workflow = defineWorkflow({
+      name: 'sendThenConfirm',
+      activities: [
+        defineActivity({
+          name: 'send',
+          retry: { maximumAttempts: 3 },
+          execute: async ({ input }) => {
+            sendAttempts++;
+            serverCalls.push(`send:${String(input['id'])}`);
+            // First launch: the request is out, then the process dies
+            // before the response arrives. The handler never settles.
+            if (sendAttempts === 1) return new Promise<never>(() => {});
+            return { sent: true };
+          },
+        }),
+        defineActivity({
+          name: 'confirm',
+          retry: { maximumAttempts: 3 },
+          execute: async () => {
+            executed.push('confirm');
+            return { confirmed: true };
+          },
+        }),
+      ],
+    });
+
+    async function launch(startTime: number) {
+      const driver = await BetterSqlite3Driver.create(dbPath);
+      const storage = new SQLiteStorage(driver);
+      await storage.initialize();
+      const clock = new MockClock(startTime);
+      const engine = await WorkflowEngine.create({
+        storage,
+        clock,
+        scheduler: new MockScheduler(clock),
+        environment: new MockEnvironment({ isConnected: true, batteryLevel: 1.0 }),
+      });
+      engine.registerWorkflow(workflow);
+      return { storage, clock, engine };
+    }
+
+    // Launch one: claim 'send', make the server call, die mid-handler.
+    const first = await launch(1_000_000);
+    const execution = await first.engine.start(workflow, { input: { id: 'move-42' } });
+    void first.engine.tick();
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(serverCalls).toEqual(['send:move-42']);
+
+    const onDisk = (await first.storage.getActivityTasksForExecution(execution.runId))[0];
+    expect(onDisk?.status).toBe('active');
+    await first.storage.close();
+
+    // Launch two, after the dead engine's lease lapsed.
+    const second = await launch(1_000_000 + 120_000);
+    const final = await runUntilSettled(second, execution.runId);
+
+    expect(final?.status).toBe('completed');
+    expect(final?.state).toMatchObject({ id: 'move-42', sent: true, confirmed: true });
+    // The server saw the call twice. Expected: handlers must be idempotent.
+    expect(serverCalls).toEqual(['send:move-42', 'send:move-42']);
+    expect(executed).toEqual(['confirm']);
+
+    const tasks = await second.storage.getActivityTasksForExecution(execution.runId);
+    expect(tasks.every(t => t.status === 'completed')).toBe(true);
+    // The kill was not a failure, so it spent no retry.
+    expect(tasks.find(t => t.activityName === 'send')?.failures ?? 0).toBe(0);
+    expect(await second.storage.getDeadLetters()).toEqual([]);
+    await second.storage.close();
+  });
+});

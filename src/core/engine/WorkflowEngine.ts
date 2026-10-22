@@ -853,7 +853,7 @@ export class WorkflowEngine {
     // before deciding is exactly how a stale send would go out.
     const expired = await this.expiryFor(claimed, now);
     if (expired) {
-      await this.handleTaskPermanentFailure(claimed, expired);
+      await this.handleTaskPermanentFailure(claimed, expired, { fenced: true });
       return true;
     }
 
@@ -1094,6 +1094,14 @@ export class WorkflowEngine {
         return;
       }
 
+      // Lease fence: record the result only while this engine still holds
+      // the claim. If the process was frozen past its lease and another
+      // engine re-claimed the task, that engine owns the outcome now.
+      if (!(await this.holdsClaim(task))) {
+        this.dropStaleResult(task, 'completed');
+        return;
+      }
+
       await this.storage.saveActivityTask(completedTask);
 
       // Call onSuccess callback
@@ -1314,6 +1322,13 @@ export class WorkflowEngine {
       return;
     }
 
+    // Lease fence, checked here so a stale attempt fires no onFailure. The
+    // writes below check again inside their transactions.
+    if (!(await this.runExclusive(() => this.holdsClaim(task)))) {
+      this.dropStaleResult(task, 'failed', error);
+      return;
+    }
+
     // Call onFailure callback
     if (activity.options?.onFailure) {
       try {
@@ -1355,7 +1370,15 @@ export class WorkflowEngine {
         ownerId: undefined,
         leaseExpiresAt: undefined,
       };
-      await this.storage.saveActivityTask(retriedTask);
+      const saved = await this.exclusiveTransaction(async () => {
+        if (!(await this.holdsClaim(task))) return false;
+        await this.storage.saveActivityTask(retriedTask);
+        return true;
+      });
+      if (!saved) {
+        this.dropStaleResult(task, 'failed', error);
+        return;
+      }
 
       this.logger.debug('Scheduled retry', {
         taskId: task.taskId,
@@ -1365,14 +1388,22 @@ export class WorkflowEngine {
       });
     } else {
       // Permanent failure
-      await this.handleTaskPermanentFailure({ ...task, failures, errorHistory }, error);
+      await this.handleTaskPermanentFailure({ ...task, failures, errorHistory }, error, { fenced: true });
     }
   }
 
   /**
    * Handle permanent task failure (exhausted retries).
+   *
+   * `fenced` is for a task this engine claimed: the failure is recorded
+   * only while the claim is still held. Crash recovery passes no fence,
+   * because it fails a task whose owner is gone, not one it claimed.
    */
-  private async handleTaskPermanentFailure(task: ActivityTask, error: Error): Promise<void> {
+  private async handleTaskPermanentFailure(
+    task: ActivityTask,
+    error: Error,
+    options: { fenced?: boolean } = {}
+  ): Promise<void> {
     const now = this.clock.now();
     const execution = await this.storage.getExecution(task.runId);
 
@@ -1404,7 +1435,11 @@ export class WorkflowEngine {
     // Failed task, dead letter, and failed execution must commit
     // atomically — a partial write leaves the workflow 'running' with a
     // dead frontier task, or a DLQ entry with a live execution.
-    await this.exclusiveTransaction(async () => {
+    const recorded = await this.exclusiveTransaction(async () => {
+      if (options.fenced && !(await this.holdsClaim(task))) {
+        return false;
+      }
+
       await this.storage.saveActivityTask(failedTask);
 
       // Call onFailed callback
@@ -1484,7 +1519,13 @@ export class WorkflowEngine {
           error: error.message,
         });
       }
+      return true;
     });
+
+    if (!recorded) {
+      this.dropStaleResult(task, 'failed', error);
+      return;
+    }
 
     this.logger.error('Activity permanently failed', {
       taskId: task.taskId,
@@ -1599,7 +1640,15 @@ export class WorkflowEngine {
       // Being held is not a failure and must not burn the claim either
       attempts: Math.max(0, task.attempts - 1),
     };
-    await this.storage.saveActivityTask(heldTask);
+    const saved = await this.exclusiveTransaction(async () => {
+      if (!(await this.holdsClaim(task))) return false;
+      await this.storage.saveActivityTask(heldTask);
+      return true;
+    });
+    if (!saved) {
+      this.dropStaleResult(task, 'held');
+      return;
+    }
 
     this.emitEvent({
       type: 'activity:held',
@@ -1628,7 +1677,7 @@ export class WorkflowEngine {
     // The save runs under the operation lock so it orders against
     // wakeSkipped's scan: either the scan runs after and finds this row, or
     // the wake was already recorded on inFlight and the row is saved due now.
-    const saved = await this.runExclusive(async () => {
+    const saved = await this.exclusiveTransaction(async () => {
       const now = this.clock.now();
 
       // Sticky terminal states: don't resurrect task rows for an
@@ -1658,6 +1707,10 @@ export class WorkflowEngine {
       };
       // Decrement attempts since this wasn't a real failure
       skippedTask.attempts = Math.max(0, skippedTask.attempts - 1);
+      if (!(await this.holdsClaim(task))) {
+        this.dropStaleResult(task, 'skipped');
+        return null;
+      }
       await this.storage.saveActivityTask(skippedTask);
       return { now };
     });
@@ -1858,6 +1911,44 @@ export class WorkflowEngine {
   // ============================================================================
   // Events
   // ============================================================================
+
+  /**
+   * Lease fence for writing a claimed task's outcome: a compare-and-set on
+   * (task_id, owner_id, status 'active'), the guard renewLease already
+   * applies. True means this engine still holds the claim. It also extends
+   * the lease, which keeps another engine off the task until the caller's
+   * write commits. Call it inside the transaction that writes the outcome.
+   */
+  private holdsClaim(task: ActivityTask): Promise<boolean> {
+    return this.storage.renewLease(task.taskId, this.ownerId, this.clock.now() + this.leaseDurationMs);
+  }
+
+  /**
+   * Report an outcome dropped because this engine lost its claim (its lease
+   * lapsed, typically while the OS had the process suspended, and another
+   * engine re-claimed the task, or the task row is gone). The workflow is
+   * not advanced and no retry is scheduled; the claim's new owner decides.
+   */
+  private dropStaleResult(task: ActivityTask, outcome: 'completed' | 'failed' | 'held' | 'skipped', error?: Error): void {
+    const now = this.clock.now();
+    this.logger.warn('Stale completion dropped: claim lost', {
+      taskId: task.taskId,
+      runId: task.runId,
+      activityName: task.activityName,
+      attempt: task.attempts,
+      outcome,
+    });
+    this.emitEvent({
+      type: 'activity:stale-completion-dropped',
+      timestamp: now,
+      runId: task.runId,
+      taskId: task.taskId,
+      activityName: task.activityName,
+      attempt: task.attempts,
+      outcome,
+      ...(error ? { error: error.message } : {}),
+    });
+  }
 
   private emitEvent(event: EngineEvent): void {
     if (this.onEvent) {
