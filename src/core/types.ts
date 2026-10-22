@@ -429,7 +429,14 @@ export type EngineEventType =
   | 'activity:held'
   | 'deadletter:added'
   | 'deadletter:redriven'
-  | 'execution:version-skew';
+  | 'execution:version-skew'
+  /**
+   * An activity's outcome was dropped because this engine no longer held
+   * the task's claim when it settled: its lease lapsed and another engine
+   * re-claimed the task. Carries `outcome` ('completed' | 'failed' |
+   * 'held' | 'skipped') and `attempt`, plus `error` for a failure.
+   */
+  | 'activity:stale-completion-dropped';
 
 export interface EngineEvent {
   type: EngineEventType;
@@ -615,6 +622,12 @@ export interface Storage {
   /**
    * Extend the lease on an active task. Returns false if the task is no
    * longer active or is owned by a different engine.
+   *
+   * The engine also uses this as its completion fence: it calls renewLease
+   * inside the transaction that records a claimed task's outcome, and drops
+   * the outcome when it returns false. Implementations must make it a true
+   * compare-and-set on (taskId, ownerId, status 'active') that joins an
+   * open transaction.
    */
   renewLease(taskId: string, ownerId: string, leaseExpiresAt: number): Promise<boolean>;
   /**
